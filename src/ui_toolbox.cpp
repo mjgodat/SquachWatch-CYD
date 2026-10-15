@@ -408,6 +408,104 @@ static void drawBeaconSpam(TFT_eSPI& t, uint32_t now) {
 }
 
 // =============================================================================
+//  RICKROLL BEACON
+// =============================================================================
+static const int RICK_COUNT = 16;
+static const char* RICK_SSIDS[] = {
+    "Never gonna give u up",
+    "Never gonna let u down",
+    "Never gonna run around",
+    "and desert you",
+    "Never gonna make u cry",
+    "Never gonna say goodbye",
+    "Never gonna tell a lie",
+    "and hurt you",
+    "We know the game and",
+    "were gonna play it",
+    "A full commitments what",
+    "Im thinking of",
+    "You wouldnt get this",
+    "from any other guy",
+    "I just wanna tell you",
+    "how Im feeling"
+};
+static uint32_t s_rickSent = 0;
+static uint32_t s_rickLastMs = 0;
+static bool     s_rickMode = false;  // true = rickroll, false = funny names
+
+static void rickrollStart() {
+    WiFi.mode(WIFI_STA);
+    WiFi.disconnect();
+    esp_wifi_set_channel(6, WIFI_SECOND_CHAN_NONE);
+    s_rickSent = 0;
+    s_rickLastMs = 0;
+    s_rickMode = true;
+    Serial.println("[toolbox] Rickroll beacon started");
+}
+
+static void rickrollTick() {
+    uint32_t now = millis();
+    if (now - s_rickLastMs < 10) return;
+    s_rickLastMs = now;
+
+    int idx = s_rickSent % RICK_COUNT;
+    const char* ssid = RICK_SSIDS[idx];
+    size_t ssidLen = strlen(ssid);
+
+    beaconFrame[10] = 0xC0; beaconFrame[11] = 0xFF;
+    beaconFrame[12] = 0xEE; beaconFrame[13] = 0x00;
+    beaconFrame[14] = (uint8_t)idx; beaconFrame[15] = (uint8_t)(idx ^ 0x55);
+    memcpy(beaconFrame + 16, beaconFrame + 10, 6);
+
+    beaconFrame[36] = 0x00;
+    beaconFrame[37] = (uint8_t)ssidLen;
+    memcpy(beaconFrame + 38, ssid, ssidLen);
+
+    size_t ratesOff = 38 + ssidLen;
+    beaconFrame[ratesOff] = 0x01;
+    beaconFrame[ratesOff + 1] = 0x08;
+    uint8_t rates[] = { 0x82, 0x84, 0x8B, 0x96, 0x0C, 0x12, 0x18, 0x24 };
+    memcpy(beaconFrame + ratesOff + 2, rates, 8);
+
+    size_t chanOff = ratesOff + 10;
+    beaconFrame[chanOff] = 0x03;
+    beaconFrame[chanOff + 1] = 0x01;
+    beaconFrame[chanOff + 2] = 0x06;
+
+    esp_wifi_80211_tx(WIFI_IF_STA, beaconFrame, chanOff + 3, false);
+    s_rickSent++;
+}
+
+static void drawRickroll(TFT_eSPI& t, uint32_t now) {
+    const int w = t.width();
+    const int h = t.height();
+
+    rickrollTick();
+
+    t.setTextColor(Theme::VAPOR_PINK, Theme::BG);
+    t.setTextDatum(MC_DATUM);
+    t.drawString("RICKROLL", w / 2, HEADER_H + 20, 4);
+
+    t.setTextDatum(TL_DATUM);
+    int listY = HEADER_H + 50;
+    for (int i = 0; i < min(RICK_COUNT, 8); i++) {
+        uint16_t col = (i == (int)(s_rickSent % RICK_COUNT)) ? Theme::VAPOR_YELLOW : Theme::CYAN;
+        t.setTextColor(col, Theme::BG);
+        t.drawString(RICK_SSIDS[i], 12, listY + i * 18, 2);
+    }
+
+    char buf[32];
+    snprintf(buf, sizeof buf, "%lu", (unsigned long)s_rickSent);
+    t.setTextColor(Theme::GREEN, Theme::BG);
+    t.setTextDatum(MC_DATUM);
+    t.drawString(buf, w / 2, h - 60, 6);
+
+    t.fillRect(0, h - 24, w, 24, Theme::TASKBAR);
+    t.setTextColor(Theme::AMBER, Theme::TASKBAR);
+    t.drawString("TAP TO STOP", w / 2, h - 12, 2);
+}
+
+// =============================================================================
 //  BLE SCAN
 // =============================================================================
 static const int MAX_BLE_RESULTS = 40;
@@ -521,6 +619,7 @@ static void stopActiveTool() {
             WiFi.mode(WIFI_OFF);
             break;
         case ActiveTool::BEACON_SPAM:
+        case ActiveTool::RICKROLL:
             WiFi.mode(WIFI_OFF);
             break;
         case ActiveTool::BLE_SCAN:
@@ -546,6 +645,7 @@ static void launchTool(ActiveTool tool) {
         case ActiveTool::WIFI_SCAN:   wifiScanStart();   break;
         case ActiveTool::DEAUTH:      /* needs target, handled separately */ break;
         case ActiveTool::BEACON_SPAM: beaconSpamStart();  break;
+        case ActiveTool::RICKROLL:    rickrollStart();    break;
         case ActiveTool::BLE_SCAN:    bleScanStart();     break;
         default: break;
     }
@@ -596,6 +696,7 @@ static const char* headerForLevel(ToolboxLevel lvl) {
                 case ActiveTool::WIFI_SCAN:   return "WIFI SCAN";
                 case ActiveTool::DEAUTH:      return "DEAUTH";
                 case ActiveTool::BEACON_SPAM: return "BEACON SPAM";
+                case ActiveTool::RICKROLL:    return "RICKROLL";
                 case ActiveTool::BLE_SCAN:    return "BLE SCAN";
                 default:                      return "RUNNING...";
             }
@@ -835,6 +936,7 @@ void uiToolboxTick(TFT_eSPI& t, uint32_t now) {
             case ActiveTool::WIFI_SCAN:   drawWifiScan(t, now);   break;
             case ActiveTool::DEAUTH:      drawDeauth(t, now);     break;
             case ActiveTool::BEACON_SPAM: drawBeaconSpam(t, now); break;
+            case ActiveTool::RICKROLL:    drawRickroll(t, now);   break;
             case ActiveTool::BLE_SCAN:    drawBleScan(t, now);    break;
             default:
                 t.setTextColor(Theme::CYAN, Theme::BG);
@@ -890,6 +992,7 @@ static bool handleWifiTap(int idx) {
             }
             break;
         case WifiTool::BEACON_SPAM:   launchTool(ActiveTool::BEACON_SPAM); break;
+        case WifiTool::RICKROLL:      launchTool(ActiveTool::RICKROLL); break;
         default:
             s_toolActive = true;
             s_activeTool = ActiveTool::NONE;
