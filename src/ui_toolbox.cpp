@@ -3186,6 +3186,13 @@ static char wcKbTap(int16_t x, int16_t y, int w, int h) {
 
 // WiChat BSSID for filtering
 static const uint8_t WICHAT_BSSID_FILTER[6] = WICHAT_BSSID;
+static bool s_wcFnMenuOpen = false;
+
+// WiChat function menu items
+static const char* WC_FN_LABELS[] = {
+    "CHANGE CHANNEL", "NODE LIST", "STATUS", "CANCEL"
+};
+static const int WC_FN_COUNT = 4;
 static QueueHandle_t s_wcRxQueue = nullptr;
 
 typedef struct {
@@ -3231,6 +3238,83 @@ static void wichatStop() {
     wichat_pin_channel(0);  // resume channel hopping
     s_wichatInit = false;
     Serial.println("[toolbox] WiChat stopped — channel hopping resumed");
+}
+
+static void drawWcFnMenu(TFT_eSPI& t) {
+    const int w = t.width(), h = t.height();
+    const int menuW = w - 60, menuH = WC_FN_COUNT * 38 + 60;
+    const int menuX = 30, menuY = (h - menuH) / 2;
+    const int rowH = 38;
+
+    t.fillRoundRect(menuX, menuY, menuW, menuH, 10, Theme::TASKBAR);
+    t.drawRoundRect(menuX, menuY, menuW, menuH, 10, Theme::PURPLE);
+
+    // Title
+    t.setTextColor(Theme::VAPOR_PINK, Theme::TASKBAR);
+    t.setTextDatum(MC_DATUM);
+    char title[32];
+    snprintf(title, sizeof title, "WICHAT  %s  CH%d", g_mesh.callsign, g_mesh.channel);
+    t.drawString(title, w / 2, menuY + 18, 2);
+
+    // Node info
+    t.setTextColor(Theme::GREEN, Theme::TASKBAR);
+    char info[32];
+    snprintf(info, sizeof info, "%d nodes  |  %d msgs", g_mesh.node_count, g_mesh.msg_count);
+    t.drawString(info, w / 2, menuY + 38, 1);
+
+    // Rows
+    int rowTop = menuY + 52;
+    for (int i = 0; i < WC_FN_COUNT; i++) {
+        int ry = rowTop + i * rowH;
+        bool isCancel = (i == WC_FN_COUNT - 1);
+        uint16_t bg = isCancel ? Theme::BG : Theme::TASKBAR;
+        uint16_t fg = isCancel ? Theme::AMBER : Theme::CYAN;
+        t.fillRoundRect(menuX + 8, ry, menuW - 16, rowH - 4, 5, bg);
+        t.setTextColor(fg, bg);
+        t.setTextDatum(MC_DATUM);
+        t.drawString(WC_FN_LABELS[i], w / 2, ry + rowH / 2 - 2, 2);
+    }
+}
+
+static bool handleWcFnTap(int16_t x, int16_t y, int w, int h) {
+    const int menuW = w - 60, menuH = WC_FN_COUNT * 38 + 60;
+    const int menuX = 30, menuY = (h - menuH) / 2;
+    const int rowH = 38;
+
+    // Outside menu = cancel
+    if (x < menuX || x > menuX + menuW || y < menuY || y > menuY + menuH) {
+        s_wcFnMenuOpen = false;
+        return true;
+    }
+
+    int rowTop = menuY + 52;
+    int row = (y - rowTop) / rowH;
+    if (row < 0 || row >= WC_FN_COUNT) { s_wcFnMenuOpen = false; return true; }
+
+    s_wcFnMenuOpen = false;
+
+    switch (row) {
+        case 0: {  // CHANGE CHANNEL
+            g_mesh.channel = (g_mesh.channel % 13) + 1;
+            wichat_pin_channel(g_mesh.channel);
+            esp_wifi_set_channel(g_mesh.channel, WIFI_SECOND_CHAN_NONE);
+            Serial.printf("[wichat] Channel changed to %d\n", g_mesh.channel);
+            break;
+        }
+        case 1:  // NODE LIST — just log for now
+            Serial.printf("[wichat] %d nodes:\n", g_mesh.node_count);
+            for (int i = 0; i < g_mesh.node_count; i++) {
+                Serial.printf("  %s rssi=%d\n", g_mesh.nodes[i].callsign, g_mesh.nodes[i].rssi);
+            }
+            break;
+        case 2:  // STATUS
+            cyd_mesh_send_ping();
+            Serial.println("[wichat] Ping sent");
+            break;
+        case 3:  // CANCEL
+            break;
+    }
+    return true;
 }
 
 static void drawWichat(TFT_eSPI& t, uint32_t now) {
@@ -3305,6 +3389,9 @@ static void drawWichat(TFT_eSPI& t, uint32_t now) {
 
     // Draw native SquatchWatch keyboard
     wcKbDraw(t, w, h);
+
+    // Fn menu overlay (long press)
+    if (s_wcFnMenuOpen) drawWcFnMenu(t);
 
     // Also accept serial input
     while (Serial.available()) {
@@ -3593,8 +3680,13 @@ void uiToolboxTouch(bool down, int16_t x, int16_t y, uint32_t now) {
             s_longPressFired = true;  // prevent firing
         } else if (now - s_downMs >= LONG_PRESS_MS) {
             s_longPressFired = true;
-            // Fire long press on scan results
-            if (s_level == ToolboxLevel::TOOL_RUNNING) {
+            // Fire long press
+            if (s_level == ToolboxLevel::TOOL_RUNNING && s_activeTool == ActiveTool::WICHAT) {
+                // WiChat: long press opens function menu
+                s_wcFnMenuOpen = true;
+                Serial.println("[wichat] fn menu opened via long press");
+            }
+            else if (s_level == ToolboxLevel::TOOL_RUNNING) {
                 int listTop = HEADER_H + 22;
                 int row = (s_downY - listTop) / (RESULT_H + RESULT_PAD) + s_toolScroll;
 
@@ -3975,6 +4067,11 @@ bool uiToolboxHandleTap(TFT_eSPI& t, int16_t x, int16_t y, uint32_t now) {
             } else if (tapHeader && !s_bleScanning) {
                 bleScanStart();  // rescan only from header tap
             }
+            return true;
+        }
+        // WiChat: fn menu has priority
+        if (s_activeTool == ActiveTool::WICHAT && s_wcFnMenuOpen) {
+            handleWcFnTap(x, y, t.width(), t.height());
             return true;
         }
         // WiChat: handle native keyboard taps
