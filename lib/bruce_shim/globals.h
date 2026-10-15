@@ -78,6 +78,14 @@ extern volatile bool returnToMenu;
 #define LH 8
 #endif
 
+#ifndef BTN_ALIAS
+#define BTN_ALIAS "TAP"
+#endif
+
+#ifndef EEPROMSIZE
+#define EEPROMSIZE 128
+#endif
+
 // padprintln — Bruce's println helper
 inline void padprintln(const String &s) {
     if (bruce_tft) bruce_tft->println(s);

@@ -11,9 +11,6 @@
 
 // Bruce modules (attack logic from Bruce firmware)
 #include "ble/ble_spam.h"
-#include "wifi/deauther.h"
-#include "wifi/wifi_atks.h"
-#include "wifi/sniffer.h"
 #include <DNSServer.h>
 
 // ---- Which tool is actively running ----
