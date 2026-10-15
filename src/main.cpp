@@ -6464,11 +6464,34 @@ void loop() {
         case AppState::TOOLBOX: {
             uiToolboxTouch(tp.valid, tp.x, tp.y, now);
             uiToolboxTick(*canvas, now);
-            if (touchJustDown) {
-                lastTouch = now;
-                if (!uiToolboxHandleTap(*canvas, tp.x, tp.y, now)) {
-                    uiToolboxStopTool();
-                    goHome();
+            // Drag-to-scroll
+            {
+                static bool tbDragging = false;
+                static int16_t tbLastY = 0;
+                static bool tbMoved = false;
+                if (touchJustDown) {
+                    tbDragging = true;
+                    tbLastY = tp.y;
+                    tbMoved = false;
+                    lastTouch = now;
+                }
+                if (tp.valid && tbDragging) {
+                    int dy = tp.y - tbLastY;
+                    if (abs(dy) > 12) {
+                        uiToolboxScroll(dy < 0 ? 1 : -1);
+                        tbLastY = tp.y;
+                        tbMoved = true;
+                    }
+                }
+                if (touchJustUp) {
+                    if (!tbMoved && tbDragging) {
+                        // It was a tap, not a drag
+                        if (!uiToolboxHandleTap(*canvas, tp.x, tp.y, now)) {
+                            uiToolboxStopTool();
+                            goHome();
+                        }
+                    }
+                    tbDragging = false;
                 }
             }
             break;
