@@ -9,6 +9,7 @@ enum class ToolCategory : uint8_t {
     BLE,
     USB,
     UTIL,
+    WICHAT,
     BACK,
     COUNT
 };

@@ -1,0 +1,7 @@
+{
+    "name": "WiChat",
+    "version": "1.0.0",
+    "description": "WiChat mesh chat over raw 802.11 frames",
+    "frameworks": "arduino",
+    "platforms": "espressif32"
+}

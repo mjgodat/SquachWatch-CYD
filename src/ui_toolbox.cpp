@@ -11,6 +11,10 @@
 
 // Bruce modules (attack logic from Bruce firmware)
 #include "ble/ble_spam.h"
+
+// WiChat mesh chat
+#include "mesh.h"
+#include "radio_esp32.h"
 #include <DNSServer.h>
 
 // ---- Which tool is actively running ----
@@ -21,7 +25,8 @@ enum class ActiveTool : uint8_t {
     BLE_SCAN, BLE_TRACK, APPLE_SPAM, SAMSUNG_SPAM, SWIFTPAIR_SPAM,
     FLIPPER_DETECT, AIRTAG_SPOOF, HAYSTACK, BLE_ENUMERATE,
     BADUSB_DUCKY, USB_KEYBOARD,
-    SD_BROWSER, PCAP_VIEWER, USB_WIRESHARK
+    SD_BROWSER, PCAP_VIEWER, USB_WIRESHARK,
+    WICHAT
 };
 
 // ---- Which context menu type is open ----
@@ -3055,6 +3060,123 @@ static void drawUsbWireshark(TFT_eSPI& t, uint32_t now) {
 }
 
 // =============================================================================
+//  WICHAT — mesh chat over raw 802.11 frames
+// =============================================================================
+static bool s_wichatInit = false;
+static char s_wichatInput[129] = {0};
+static int s_wichatInputLen = 0;
+static int s_wichatMsgVer = -1;
+static int s_wichatScroll = 0;
+
+static void wichatStart() {
+    if (!s_wichatInit) {
+        radio_esp32_init(WICHAT_DEFAULT_CH);
+        cyd_mesh_init("SQW");
+        cyd_mesh_send_beacon();
+        s_wichatInit = true;
+        Serial.println("[toolbox] WiChat started");
+    }
+    s_wichatInput[0] = 0;
+    s_wichatInputLen = 0;
+    s_wichatMsgVer = -1;
+    s_wichatScroll = 0;
+}
+
+static void wichatStop() {
+    // Leave mesh running in background — just stop displaying
+    Serial.println("[toolbox] WiChat display closed (mesh stays active)");
+}
+
+static void drawWichat(TFT_eSPI& t, uint32_t now) {
+    const int w = t.width();
+    const int h = t.height();
+
+    // Process mesh
+    uint8_t rx_buf[512]; int8_t rssi;
+    int rx_len = radio_esp32_rx(rx_buf, sizeof(rx_buf), &rssi);
+    if (rx_len > 0) cyd_mesh_process_rx(rx_buf, (size_t)rx_len, rssi);
+    cyd_mesh_tick(now);
+
+    // Header
+    char hdr[48];
+    snprintf(hdr, sizeof hdr, "WICHAT  %s  CH%d  %d nodes",
+             g_mesh.callsign, g_mesh.channel, g_mesh.node_count);
+    t.setTextColor(Theme::GREEN, Theme::BG);
+    t.setTextDatum(MC_DATUM);
+    t.drawString(hdr, w / 2, HEADER_H / 2, 2);
+
+    // Chat messages
+    int chatTop = HEADER_H + 4;
+    int chatH = h - HEADER_H - 50;
+    int lineH = 18;
+    int maxLines = chatH / lineH;
+
+    t.fillRect(0, chatTop, w, chatH, Theme::TASKBAR);
+
+    int total = g_mesh.msg_count;
+    int start = total - maxLines;
+    if (start < 0) start = 0;
+
+    for (int i = start; i < total && (i - start) < maxLines; i++) {
+        int idx = (total <= WICHAT_MAX_MESSAGES) ? i :
+                  (g_mesh.msg_head + i) % WICHAT_MAX_MESSAGES;
+        int y = chatTop + (i - start) * lineH;
+
+        // Sender
+        bool isMe = (strcmp(g_mesh.messages[idx].sender, g_mesh.callsign) == 0);
+        t.setTextColor(isMe ? Theme::VAPOR_PINK : Theme::CYAN, Theme::TASKBAR);
+        t.setTextDatum(TL_DATUM);
+        char line[60];
+        snprintf(line, sizeof line, "%s: %s", g_mesh.messages[idx].sender, g_mesh.messages[idx].text);
+        t.drawString(line, 4, y + 2, 2);
+
+        // Status indicator for our messages
+        if (isMe) {
+            const char* sts = "";
+            switch (g_mesh.messages[idx].status) {
+                case MSG_STATUS_PENDING: sts = "..."; break;
+                case MSG_STATUS_ACKED:   sts = "OK";  break;
+                case MSG_STATUS_FAILED:  sts = "X";   break;
+            }
+            t.setTextColor(g_mesh.messages[idx].status == MSG_STATUS_ACKED ? Theme::GREEN : Theme::RED, Theme::TASKBAR);
+            t.setTextDatum(TR_DATUM);
+            t.drawString(sts, w - 4, y + 2, 1);
+        }
+    }
+
+    // Input bar
+    int inputY = h - 44;
+    t.fillRect(0, inputY, w, 20, Theme::BG);
+    t.drawRect(4, inputY, w - 8, 20, Theme::CYAN);
+    t.setTextColor(Theme::VAPOR_YELLOW, Theme::BG);
+    t.setTextDatum(ML_DATUM);
+    t.drawString(s_wichatInput, 8, inputY + 10, 2);
+
+    // Bottom instructions
+    t.fillRect(0, h - 24, w, 24, Theme::TASKBAR);
+    t.setTextColor(Theme::AMBER, Theme::TASKBAR);
+    t.setTextDatum(MC_DATUM);
+    t.drawString("Serial: type message + Enter | TAP TO STOP", w / 2, h - 12, 1);
+
+    // Read serial input for chat
+    while (Serial.available()) {
+        char c = Serial.read();
+        if (c == '\n' || c == '\r') {
+            if (s_wichatInputLen > 0) {
+                cyd_mesh_send_chat(s_wichatInput);
+                s_wichatInput[0] = 0;
+                s_wichatInputLen = 0;
+            }
+        } else if (c == '\b' && s_wichatInputLen > 0) {
+            s_wichatInput[--s_wichatInputLen] = 0;
+        } else if (s_wichatInputLen < 128 && c >= 32) {
+            s_wichatInput[s_wichatInputLen++] = c;
+            s_wichatInput[s_wichatInputLen] = 0;
+        }
+    }
+}
+
+// =============================================================================
 //  Tool stop / cleanup
 // =============================================================================
 static void stopActiveTool() {
@@ -3131,6 +3253,9 @@ static void stopActiveTool() {
         case ActiveTool::USB_WIRESHARK:
             usbWiresharkStop();
             break;
+        case ActiveTool::WICHAT:
+            wichatStop();
+            break;
         case ActiveTool::SD_BROWSER:
         case ActiveTool::PCAP_VIEWER:
             break;
@@ -3178,6 +3303,7 @@ static void launchTool(ActiveTool tool) {
         case ActiveTool::SD_BROWSER:     sdBrowserStart();      break;
         case ActiveTool::PCAP_VIEWER:    pcapViewerStart();     break;
         case ActiveTool::USB_WIRESHARK:  usbWiresharkStart();   break;
+        case ActiveTool::WICHAT:         wichatStart();         break;
         default: break;
     }
 }
@@ -3186,7 +3312,7 @@ static void launchTool(ActiveTool tool) {
 //  Menu labels (unchanged)
 // =============================================================================
 static const char* CAT_LABELS_PLAIN[] = {
-    "WIFI ATTACKS", "BLE TOOLS", "USB / BADUSB", "UTILITIES", "< BACK"
+    "WIFI ATTACKS", "BLE TOOLS", "USB / BADUSB", "UTILITIES", "WICHAT MESH", "< BACK"
 };
 static const char* WIFI_LABELS[] = {
     "SCAN NETWORKS", "DEAUTH", "BEACON SPAM", "EVIL PORTAL",
@@ -3253,6 +3379,7 @@ static const char* headerForLevel(ToolboxLevel lvl) {
                 case ActiveTool::SD_BROWSER:     return "SD BROWSER";
                 case ActiveTool::PCAP_VIEWER:    return "PCAP VIEWER";
                 case ActiveTool::USB_WIRESHARK:  return "USB WIRESHARK";
+                case ActiveTool::WICHAT:         return "WICHAT";
                 default:                      return "RUNNING...";
             }
         default: return "TOOLBOX";
@@ -3534,6 +3661,7 @@ void uiToolboxTick(TFT_eSPI& t, uint32_t now) {
             case ActiveTool::SD_BROWSER:     drawSdBrowser(t, now);     break;
             case ActiveTool::PCAP_VIEWER:    drawPcapViewer(t, now);    break;
             case ActiveTool::USB_WIRESHARK:  drawUsbWireshark(t, now);  break;
+            case ActiveTool::WICHAT:         drawWichat(t, now);        break;
             default:
                 t.setTextColor(Theme::CYAN, Theme::BG);
                 t.setTextDatum(MC_DATUM);
@@ -3566,8 +3694,9 @@ static void handleCategoryTap(int idx) {
         case ToolCategory::WIFI: s_level = ToolboxLevel::WIFI_TOOLS; s_scroll = 0; break;
         case ToolCategory::BLE:  s_level = ToolboxLevel::BLE_TOOLS;  s_scroll = 0; break;
         case ToolCategory::USB:  s_level = ToolboxLevel::USB_TOOLS;  s_scroll = 0; break;
-        case ToolCategory::UTIL: s_level = ToolboxLevel::UTIL_TOOLS; s_scroll = 0; break;
-        case ToolCategory::BACK: break;
+        case ToolCategory::UTIL:   s_level = ToolboxLevel::UTIL_TOOLS; s_scroll = 0; break;
+        case ToolCategory::WICHAT: launchTool(ActiveTool::WICHAT); break;
+        case ToolCategory::BACK:   break;
         default: break;
     }
 }
