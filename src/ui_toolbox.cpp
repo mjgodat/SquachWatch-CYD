@@ -2623,9 +2623,27 @@ static void bleEnumerateStart(int bleIdx) {
     NimBLEScan* scan = NimBLEDevice::getScan();
     if (scan && scan->isScanning()) scan->stop();
 
-    Serial.printf("[toolbox] BLE enumerate: %s — requires NimBLE client role\n", s_enumAddr);
-    // NimBLE client role not enabled in this build config.
-    // Would need CONFIG_BT_NIMBLE_ROLE_CENTRAL=1 in sdkconfig.
+    Serial.printf("[toolbox] Connecting to %s for GATT enum...\n", s_enumAddr);
+
+    NimBLEClient* client = NimBLEDevice::createClient();
+    NimBLEAddress addr(std::string(s_enumAddr), 1);
+    if (client && client->connect(addr)) {
+        auto& svcs = client->getServices(true);
+        for (auto* svc : svcs) {
+            if (s_gattSvcCount >= MAX_GATT_SVC) break;
+            GattService& g = s_gattSvcs[s_gattSvcCount];
+            strncpy(g.uuid, svc->getUUID().toString().c_str(), 36);
+            g.uuid[36] = 0;
+            auto& chars = svc->getCharacteristics(true);
+            g.charCount = (int)chars.size();
+            s_gattSvcCount++;
+        }
+        client->disconnect();
+        Serial.printf("[toolbox] GATT enum done: %d services\n", s_gattSvcCount);
+    } else {
+        Serial.println("[toolbox] GATT connect failed");
+    }
+    NimBLEDevice::deleteClient(client);
     s_enumDone = true;
 }
 
@@ -2823,6 +2841,93 @@ static void drawPcapViewer(TFT_eSPI& t, uint32_t now) {
 }
 
 // =============================================================================
+//  USB WIRESHARK — stream WiFi packets over USB serial in PCAP format
+// =============================================================================
+static uint32_t s_wsFrames = 0;
+static bool s_wsActive = false;
+
+static void IRAM_ATTR wsSniffCb(void* buf, wifi_promiscuous_pkt_type_t type) {
+    if (!s_wsActive) return;
+    const wifi_promiscuous_pkt_t* pkt = (wifi_promiscuous_pkt_t*)buf;
+    int len = pkt->rx_ctrl.sig_len;
+    if (len <= 0 || len > 2500) return;
+
+    // Write PCAP packet header + payload over serial
+    uint32_t ts_sec = millis() / 1000;
+    uint32_t ts_usec = (millis() % 1000) * 1000;
+    uint32_t incl = len, orig = len;
+    Serial.write((uint8_t*)&ts_sec, 4);
+    Serial.write((uint8_t*)&ts_usec, 4);
+    Serial.write((uint8_t*)&incl, 4);
+    Serial.write((uint8_t*)&orig, 4);
+    Serial.write(pkt->payload, len);
+    s_wsFrames++;
+}
+
+static void usbWiresharkStart() {
+    s_wsFrames = 0;
+    s_wsActive = true;
+
+    // Write PCAP global header over serial first
+    uint8_t hdr[24] = {0xD4,0xC3,0xB2,0xA1, 0x02,0x00,0x04,0x00,
+                        0,0,0,0, 0,0,0,0, 0xFF,0xFF,0x00,0x00, 0x69,0x00,0x00,0x00};
+    Serial.write(hdr, 24);
+
+    WiFi.mode(WIFI_STA);
+    WiFi.disconnect();
+    esp_wifi_set_promiscuous(true);
+    esp_wifi_set_promiscuous_rx_cb(wsSniffCb);
+    esp_wifi_set_channel(1, WIFI_SECOND_CHAN_NONE);
+    Serial.println("[wireshark] Streaming PCAP over USB — pipe to Wireshark");
+}
+
+static void usbWiresharkStop() {
+    s_wsActive = false;
+    esp_wifi_set_promiscuous(false);
+    WiFi.mode(WIFI_OFF);
+}
+
+static uint8_t s_wsChan = 1;
+static uint32_t s_wsHopMs = 0;
+
+static void drawUsbWireshark(TFT_eSPI& t, uint32_t now) {
+    const int w = t.width();
+    const int h = t.height();
+
+    // Channel hop
+    if (now - s_wsHopMs > 500) {
+        s_wsHopMs = now;
+        s_wsChan = (s_wsChan % 13) + 1;
+        esp_wifi_set_channel(s_wsChan, WIFI_SECOND_CHAN_NONE);
+    }
+
+    t.setTextColor(Theme::VAPOR_BLUE, Theme::BG);
+    t.setTextDatum(MC_DATUM);
+    t.drawString("USB WIRESHARK", w / 2, HEADER_H + 20, 4);
+
+    t.setTextColor(Theme::CYAN, Theme::BG);
+    t.drawString("Streaming PCAP over USB serial", w / 2, HEADER_H + 55, 2);
+
+    char buf[48];
+    snprintf(buf, sizeof buf, "CH%d hopping", s_wsChan);
+    t.setTextColor(Theme::AMBER, Theme::BG);
+    t.drawString(buf, w / 2, HEADER_H + 75, 2);
+
+    snprintf(buf, sizeof buf, "%lu", (unsigned long)s_wsFrames);
+    t.setTextColor(Theme::GREEN, Theme::BG);
+    t.drawString(buf, w / 2, h / 2, 7);
+    t.setTextColor(Theme::VAPOR_PURPLE, Theme::BG);
+    t.drawString("frames streamed", w / 2, h / 2 + 40, 2);
+
+    t.setTextColor(Theme::VAPOR_YELLOW, Theme::BG);
+    t.drawString("Host: pipe serial to Wireshark", w / 2, h / 2 + 70, 2);
+
+    t.fillRect(0, h - 24, w, 24, Theme::TASKBAR);
+    t.setTextColor(Theme::AMBER, Theme::TASKBAR);
+    t.drawString("TAP TO STOP", w / 2, h - 12, 2);
+}
+
+// =============================================================================
 //  Tool stop / cleanup
 // =============================================================================
 static void stopActiveTool() {
@@ -2896,9 +3001,11 @@ static void stopActiveTool() {
             break;
         case ActiveTool::BLE_ENUMERATE:
             break;
+        case ActiveTool::USB_WIRESHARK:
+            usbWiresharkStop();
+            break;
         case ActiveTool::SD_BROWSER:
         case ActiveTool::PCAP_VIEWER:
-        case ActiveTool::USB_WIRESHARK:
             break;
         default: break;
     }
@@ -2943,6 +3050,7 @@ static void launchTool(ActiveTool tool) {
         case ActiveTool::BLE_ENUMERATE:  /* started via bleEnumerateStart() */ break;
         case ActiveTool::SD_BROWSER:     sdBrowserStart();      break;
         case ActiveTool::PCAP_VIEWER:    pcapViewerStart();     break;
+        case ActiveTool::USB_WIRESHARK:  usbWiresharkStart();   break;
         default: break;
     }
 }
@@ -3017,6 +3125,7 @@ static const char* headerForLevel(ToolboxLevel lvl) {
                 case ActiveTool::BLE_ENUMERATE:  return "BLE ENUM";
                 case ActiveTool::SD_BROWSER:     return "SD BROWSER";
                 case ActiveTool::PCAP_VIEWER:    return "PCAP VIEWER";
+                case ActiveTool::USB_WIRESHARK:  return "USB WIRESHARK";
                 default:                      return "RUNNING...";
             }
         default: return "TOOLBOX";
@@ -3297,6 +3406,7 @@ void uiToolboxTick(TFT_eSPI& t, uint32_t now) {
             case ActiveTool::BLE_ENUMERATE:  drawBleEnumerate(t, now);  break;
             case ActiveTool::SD_BROWSER:     drawSdBrowser(t, now);     break;
             case ActiveTool::PCAP_VIEWER:    drawPcapViewer(t, now);    break;
+            case ActiveTool::USB_WIRESHARK:  drawUsbWireshark(t, now);  break;
             default:
                 t.setTextColor(Theme::CYAN, Theme::BG);
                 t.setTextDatum(MC_DATUM);
@@ -3410,7 +3520,8 @@ static bool handleUtilTap(int idx) {
     switch ((UtilTool)idx) {
         case UtilTool::SD_BROWSER:    launchTool(ActiveTool::SD_BROWSER); break;
         case UtilTool::WIFI_LOGGER:   launchTool(ActiveTool::WIFI_LOGGER); break;
-        case UtilTool::PCAP_VIEWER:   launchTool(ActiveTool::PCAP_VIEWER); break;
+        case UtilTool::PCAP_VIEWER:    launchTool(ActiveTool::PCAP_VIEWER); break;
+        case UtilTool::USB_WIRESHARK:  launchTool(ActiveTool::USB_WIRESHARK); break;
         default:
             s_toolActive = true;
             s_activeTool = ActiveTool::NONE;
