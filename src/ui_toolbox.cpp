@@ -9,7 +9,13 @@
 #include <NimBLEDevice.h>
 
 // ---- Which tool is actively running ----
-enum class ActiveTool : uint8_t { NONE = 0, WIFI_SCAN, DEAUTH, BEACON_SPAM, BLE_SCAN, BLE_SPAM_APPLE };
+enum class ActiveTool : uint8_t {
+    NONE = 0, WIFI_SCAN, DEAUTH, BEACON_SPAM, RICKROLL, CLONE_AP,
+    PROBE_SNIFF, BLE_SCAN, BLE_TRACK, APPLE_SPAM, SAMSUNG_SPAM, SWIFTPAIR_SPAM
+};
+
+// ---- Which context menu type is open ----
+enum class ContextType : uint8_t { NONE = 0, WIFI, BLE };
 
 // ---- State ----
 static ToolboxLevel  s_level  = ToolboxLevel::CATEGORIES;
@@ -30,6 +36,8 @@ static bool     s_contextMenuOpen = false;
 static int      s_contextTarget = -1;     // index of the item long-pressed
 static int      s_contextScroll = 0;
 
+static ContextType s_contextType = ContextType::NONE;
+
 // Context menu items for a WiFi network
 static const char* WIFI_CTX_LABELS[] = {
     "DEAUTH THIS AP",
@@ -40,6 +48,15 @@ static const char* WIFI_CTX_LABELS[] = {
     "CANCEL"
 };
 static const int WIFI_CTX_COUNT = 6;
+
+// Context menu items for a BLE device
+static const char* BLE_CTX_LABELS[] = {
+    "TRACK SIGNAL",
+    "ENUMERATE SERVICES",
+    "CANCEL"
+};
+static const int BLE_CTX_COUNT = 3;
+static int s_bleSelected = -1;
 
 // ---- Layout ----
 static const int ROW_H     = 42;
@@ -645,17 +662,26 @@ void uiToolboxTouch(bool down, int16_t x, int16_t y, uint32_t now) {
             s_longPressFired = true;  // prevent firing
         } else if (now - s_downMs >= LONG_PRESS_MS) {
             s_longPressFired = true;
-            // Fire long press — only meaningful during WiFi scan results
-            if (s_level == ToolboxLevel::TOOL_RUNNING &&
-                s_activeTool == ActiveTool::WIFI_SCAN && !s_scanning) {
+            // Fire long press on scan results
+            if (s_level == ToolboxLevel::TOOL_RUNNING) {
                 int listTop = HEADER_H + 22;
                 int row = (s_downY - listTop) / (RESULT_H + RESULT_PAD) + s_toolScroll;
-                if (row >= 0 && row < s_scanCount) {
+
+                if (s_activeTool == ActiveTool::WIFI_SCAN && !s_scanning &&
+                    row >= 0 && row < s_scanCount) {
                     s_contextTarget = row;
                     s_scanSelected = row;
                     s_contextMenuOpen = true;
-                    s_contextScroll = 0;
-                    Serial.printf("[toolbox] long press on: %s\n", s_scanResults[row].ssid);
+                    s_contextType = ContextType::WIFI;
+                    Serial.printf("[toolbox] long press WiFi: %s\n", s_scanResults[row].ssid);
+                }
+                else if (s_activeTool == ActiveTool::BLE_SCAN && !s_bleScanning &&
+                         row >= 0 && row < s_bleCount) {
+                    s_contextTarget = row;
+                    s_bleSelected = row;
+                    s_contextMenuOpen = true;
+                    s_contextType = ContextType::BLE;
+                    Serial.printf("[toolbox] long press BLE: %s\n", s_bleResults[row].name);
                 }
             }
         }
@@ -672,12 +698,17 @@ static void drawContextMenu(TFT_eSPI& t) {
     const int h = t.height();
     const int menuW = w - 40;
     const int rowH = 38;
-    const int menuH = WIFI_CTX_COUNT * rowH + 50;
+    const char** labels;
+    int count;
+    if (s_contextType == ContextType::BLE) {
+        labels = BLE_CTX_LABELS; count = BLE_CTX_COUNT;
+    } else {
+        labels = WIFI_CTX_LABELS; count = WIFI_CTX_COUNT;
+    }
+    const int menuH = count * rowH + 50;
     const int menuX = 20;
     const int menuY = (h - menuH) / 2;
 
-    // Dim background
-    // (simple: draw a semi-transparent overlay by filling with dark color)
     t.fillRect(0, 0, w, h, Theme::BG);
 
     // Menu card
@@ -685,27 +716,31 @@ static void drawContextMenu(TFT_eSPI& t) {
     t.drawRoundRect(menuX, menuY, menuW, menuH, 10, Theme::PURPLE);
     t.drawRoundRect(menuX + 1, menuY + 1, menuW - 2, menuH - 2, 9, Theme::PURPLE);
 
-    // Title: target network name
+    // Title: target name
     t.setTextColor(Theme::VAPOR_PINK, Theme::TASKBAR);
     t.setTextDatum(MC_DATUM);
-    if (s_contextTarget >= 0 && s_contextTarget < s_scanCount) {
-        char title[36];
+    char title[40];
+    if (s_contextType == ContextType::BLE && s_contextTarget >= 0 && s_contextTarget < s_bleCount) {
+        snprintf(title, sizeof title, ">> %s <<", s_bleResults[s_contextTarget].name);
+    } else if (s_contextTarget >= 0 && s_contextTarget < s_scanCount) {
         snprintf(title, sizeof title, ">> %s <<", s_scanResults[s_contextTarget].ssid);
-        t.drawString(title, w / 2, menuY + 18, 2);
+    } else {
+        strcpy(title, ">> ??? <<");
     }
+    t.drawString(title, w / 2, menuY + 18, 2);
 
     // Menu rows
     int rowTop = menuY + 40;
-    for (int i = 0; i < WIFI_CTX_COUNT; i++) {
+    for (int i = 0; i < count; i++) {
         int ry = rowTop + i * rowH;
-        bool isCancel = (i == WIFI_CTX_COUNT - 1);
+        bool isCancel = (i == count - 1);
         uint16_t bg = isCancel ? Theme::BG : Theme::TASKBAR;
         uint16_t fg = isCancel ? Theme::AMBER : Theme::CYAN;
 
         t.fillRoundRect(menuX + 8, ry, menuW - 16, rowH - 4, 5, bg);
         t.setTextColor(fg, bg);
         t.setTextDatum(MC_DATUM);
-        t.drawString(WIFI_CTX_LABELS[i], w / 2, ry + rowH / 2 - 2, 2);
+        t.drawString(labels[i], w / 2, ry + rowH / 2 - 2, 2);
     }
 }
 
@@ -714,11 +749,11 @@ static bool handleContextTap(TFT_eSPI& t, int16_t x, int16_t y) {
     const int h = t.height();
     const int menuW = w - 40;
     const int rowH = 38;
-    const int menuH = WIFI_CTX_COUNT * rowH + 50;
+    int count = (s_contextType == ContextType::BLE) ? BLE_CTX_COUNT : WIFI_CTX_COUNT;
+    const int menuH = count * rowH + 50;
     const int menuX = 20;
     const int menuY = (h - menuH) / 2;
 
-    // Outside the menu = cancel
     if (x < menuX || x > menuX + menuW || y < menuY || y > menuY + menuH) {
         s_contextMenuOpen = false;
         return true;
@@ -726,31 +761,38 @@ static bool handleContextTap(TFT_eSPI& t, int16_t x, int16_t y) {
 
     int rowTop = menuY + 40;
     int row = (y - rowTop) / rowH;
-    if (row < 0 || row >= WIFI_CTX_COUNT) {
-        s_contextMenuOpen = false;
-        return true;
-    }
+    if (row < 0 || row >= count) { s_contextMenuOpen = false; return true; }
 
     s_contextMenuOpen = false;
-
-    // Last row = cancel
-    if (row == WIFI_CTX_COUNT - 1) return true;
+    if (row == count - 1) return true;  // CANCEL
 
     int target = s_contextTarget;
-    if (target < 0 || target >= s_scanCount) return true;
 
-    switch (row) {
-        case 0:  // DEAUTH THIS AP
-            deauthStart(target);
-            launchTool(ActiveTool::DEAUTH);
-            break;
-        case 1:  // CLONE THIS AP — stub for now
-        case 2:  // CAPTURE HANDSHAKE — stub
-        case 3:  // CAPTURE PMKID — stub
-        case 4:  // MONITOR (PCAP) — stub
-            Serial.printf("[toolbox] %s on %s — not yet implemented\n",
-                          WIFI_CTX_LABELS[row], s_scanResults[target].ssid);
-            break;
+    if (s_contextType == ContextType::WIFI) {
+        if (target < 0 || target >= s_scanCount) return true;
+        switch (row) {
+            case 0:  // DEAUTH
+                deauthStart(target);
+                launchTool(ActiveTool::DEAUTH);
+                break;
+            default:
+                Serial.printf("[toolbox] %s on %s — not yet implemented\n",
+                              WIFI_CTX_LABELS[row], s_scanResults[target].ssid);
+                break;
+        }
+    } else if (s_contextType == ContextType::BLE) {
+        if (target < 0 || target >= s_bleCount) return true;
+        switch (row) {
+            case 0:  // TRACK SIGNAL
+                Serial.printf("[toolbox] Track: %s %s\n",
+                              s_bleResults[target].name, s_bleResults[target].addr);
+                // TODO: implement BLE RSSI tracker for this device
+                break;
+            case 1:  // ENUMERATE SERVICES
+                Serial.printf("[toolbox] Enumerate: %s\n", s_bleResults[target].addr);
+                // TODO: connect and discover GATT services
+                break;
+        }
     }
     return true;
 }
