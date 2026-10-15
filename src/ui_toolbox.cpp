@@ -3213,12 +3213,12 @@ static void wichatStart() {
         // Create RX queue and register hook — NO radio takeover
         if (!s_wcRxQueue) s_wcRxQueue = xQueueCreate(16, sizeof(wc_rx_t));
         wichat_set_rx_hook(wichatRxHook);
+        wichat_pin_channel(WICHAT_DEFAULT_CH);  // pin to channel 1
         cyd_mesh_init("SQW");
-        // Get our MAC
         esp_wifi_get_mac(WIFI_IF_STA, g_mesh.local_mac);
         cyd_mesh_send_beacon();
         s_wichatInit = true;
-        Serial.println("[toolbox] WiChat started — sharing radio with scanner");
+        Serial.println("[toolbox] WiChat started — pinned to CH1, sharing radio");
     }
     s_wichatInput[0] = 0;
     s_wichatInputLen = 0;
@@ -3227,10 +3227,10 @@ static void wichatStart() {
 }
 
 static void wichatStop() {
-    // Just unhook — don't touch the radio
     wichat_set_rx_hook(nullptr);
+    wichat_pin_channel(0);  // resume channel hopping
     s_wichatInit = false;
-    Serial.println("[toolbox] WiChat stopped — hook removed");
+    Serial.println("[toolbox] WiChat stopped — channel hopping resumed");
 }
 
 static void drawWichat(TFT_eSPI& t, uint32_t now) {

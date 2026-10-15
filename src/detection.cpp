@@ -1530,7 +1530,10 @@ void DetectionEngine::hopChannel() {
 #if SQW_WIFI_5G
     const uint8_t left = _wifiChannel;
 #endif
-    _wifiChannel = (_wifiChannel % 13) + 1;
+    { uint8_t pin = wichat_pinned_channel();
+      if (pin >= 1 && pin <= 13) _wifiChannel = pin;
+      else _wifiChannel = (_wifiChannel % 13) + 1;
+    }
 #if SQW_WIFI_5G
     if (left == 13 && start5(now)) return;
 #endif
