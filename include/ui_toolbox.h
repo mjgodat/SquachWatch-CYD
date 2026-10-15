@@ -73,6 +73,9 @@ void uiToolboxInit(TFT_eSPI& t);
 void uiToolboxTick(TFT_eSPI& t, uint32_t now);
 void uiToolboxScroll(int delta);
 
+// Call every frame with current touch state for long-press detection.
+void uiToolboxTouch(bool down, int16_t x, int16_t y, uint32_t now);
+
 // Returns true if the toolbox wants to stay open; false means go back to CLEAR.
 bool uiToolboxHandleTap(TFT_eSPI& t, int16_t x, int16_t y, uint32_t now);
 

@@ -20,6 +20,27 @@ static ActiveTool    s_activeTool = ActiveTool::NONE;
 static uint32_t      s_toolStartMs = 0;
 static int           s_toolScroll = 0;  // scroll within tool output
 
+// ---- Long press & context menu ----
+static const uint32_t LONG_PRESS_MS = 600;
+static bool     s_fingerDown = false;
+static int16_t  s_downX = 0, s_downY = 0;
+static uint32_t s_downMs = 0;
+static bool     s_longPressFired = false;
+static bool     s_contextMenuOpen = false;
+static int      s_contextTarget = -1;     // index of the item long-pressed
+static int      s_contextScroll = 0;
+
+// Context menu items for a WiFi network
+static const char* WIFI_CTX_LABELS[] = {
+    "DEAUTH THIS AP",
+    "CLONE THIS AP",
+    "CAPTURE HANDSHAKE",
+    "CAPTURE PMKID",
+    "MONITOR (PCAP)",
+    "CANCEL"
+};
+static const int WIFI_CTX_COUNT = 6;
+
 // ---- Layout ----
 static const int ROW_H     = 42;
 static const int ROW_PAD   = 6;
@@ -607,6 +628,134 @@ static void drawMenuRows(TFT_eSPI& t) {
 }
 
 // =============================================================================
+//  Long press detection
+// =============================================================================
+void uiToolboxTouch(bool down, int16_t x, int16_t y, uint32_t now) {
+    if (down && !s_fingerDown) {
+        // Finger just came down
+        s_fingerDown = true;
+        s_downX = x; s_downY = y;
+        s_downMs = now;
+        s_longPressFired = false;
+    } else if (down && s_fingerDown && !s_longPressFired) {
+        // Finger still held — check distance and time
+        int dx = abs(x - s_downX), dy = abs(y - s_downY);
+        if (dx > 15 || dy > 15) {
+            // Moved too much — cancel
+            s_longPressFired = true;  // prevent firing
+        } else if (now - s_downMs >= LONG_PRESS_MS) {
+            s_longPressFired = true;
+            // Fire long press — only meaningful during WiFi scan results
+            if (s_level == ToolboxLevel::TOOL_RUNNING &&
+                s_activeTool == ActiveTool::WIFI_SCAN && !s_scanning) {
+                int listTop = HEADER_H + 22;
+                int row = (s_downY - listTop) / (RESULT_H + RESULT_PAD) + s_toolScroll;
+                if (row >= 0 && row < s_scanCount) {
+                    s_contextTarget = row;
+                    s_scanSelected = row;
+                    s_contextMenuOpen = true;
+                    s_contextScroll = 0;
+                    Serial.printf("[toolbox] long press on: %s\n", s_scanResults[row].ssid);
+                }
+            }
+        }
+    } else if (!down) {
+        s_fingerDown = false;
+    }
+}
+
+// =============================================================================
+//  Context menu drawing & handling
+// =============================================================================
+static void drawContextMenu(TFT_eSPI& t) {
+    const int w = t.width();
+    const int h = t.height();
+    const int menuW = w - 40;
+    const int rowH = 38;
+    const int menuH = WIFI_CTX_COUNT * rowH + 50;
+    const int menuX = 20;
+    const int menuY = (h - menuH) / 2;
+
+    // Dim background
+    // (simple: draw a semi-transparent overlay by filling with dark color)
+    t.fillRect(0, 0, w, h, Theme::BG);
+
+    // Menu card
+    t.fillRoundRect(menuX, menuY, menuW, menuH, 10, Theme::TASKBAR);
+    t.drawRoundRect(menuX, menuY, menuW, menuH, 10, Theme::PURPLE);
+    t.drawRoundRect(menuX + 1, menuY + 1, menuW - 2, menuH - 2, 9, Theme::PURPLE);
+
+    // Title: target network name
+    t.setTextColor(Theme::VAPOR_PINK, Theme::TASKBAR);
+    t.setTextDatum(MC_DATUM);
+    if (s_contextTarget >= 0 && s_contextTarget < s_scanCount) {
+        char title[36];
+        snprintf(title, sizeof title, ">> %s <<", s_scanResults[s_contextTarget].ssid);
+        t.drawString(title, w / 2, menuY + 18, 2);
+    }
+
+    // Menu rows
+    int rowTop = menuY + 40;
+    for (int i = 0; i < WIFI_CTX_COUNT; i++) {
+        int ry = rowTop + i * rowH;
+        bool isCancel = (i == WIFI_CTX_COUNT - 1);
+        uint16_t bg = isCancel ? Theme::BG : Theme::TASKBAR;
+        uint16_t fg = isCancel ? Theme::AMBER : Theme::CYAN;
+
+        t.fillRoundRect(menuX + 8, ry, menuW - 16, rowH - 4, 5, bg);
+        t.setTextColor(fg, bg);
+        t.setTextDatum(MC_DATUM);
+        t.drawString(WIFI_CTX_LABELS[i], w / 2, ry + rowH / 2 - 2, 2);
+    }
+}
+
+static bool handleContextTap(TFT_eSPI& t, int16_t x, int16_t y) {
+    const int w = t.width();
+    const int h = t.height();
+    const int menuW = w - 40;
+    const int rowH = 38;
+    const int menuH = WIFI_CTX_COUNT * rowH + 50;
+    const int menuX = 20;
+    const int menuY = (h - menuH) / 2;
+
+    // Outside the menu = cancel
+    if (x < menuX || x > menuX + menuW || y < menuY || y > menuY + menuH) {
+        s_contextMenuOpen = false;
+        return true;
+    }
+
+    int rowTop = menuY + 40;
+    int row = (y - rowTop) / rowH;
+    if (row < 0 || row >= WIFI_CTX_COUNT) {
+        s_contextMenuOpen = false;
+        return true;
+    }
+
+    s_contextMenuOpen = false;
+
+    // Last row = cancel
+    if (row == WIFI_CTX_COUNT - 1) return true;
+
+    int target = s_contextTarget;
+    if (target < 0 || target >= s_scanCount) return true;
+
+    switch (row) {
+        case 0:  // DEAUTH THIS AP
+            deauthStart(target);
+            launchTool(ActiveTool::DEAUTH);
+            break;
+        case 1:  // CLONE THIS AP — stub for now
+        case 2:  // CAPTURE HANDSHAKE — stub
+        case 3:  // CAPTURE PMKID — stub
+        case 4:  // MONITOR (PCAP) — stub
+            Serial.printf("[toolbox] %s on %s — not yet implemented\n",
+                          WIFI_CTX_LABELS[row], s_scanResults[target].ssid);
+            break;
+    }
+    return true;
+}
+
+// =============================================================================
 //  Public API
 // =============================================================================
 void uiToolboxInit(TFT_eSPI& t) {
@@ -614,6 +763,7 @@ void uiToolboxInit(TFT_eSPI& t) {
     s_scroll = 0;
     s_selected = -1;
     s_toolActive = false;
+    s_contextMenuOpen = false;
     s_activeTool = ActiveTool::NONE;
     s_toolScroll = 0;
 }
@@ -630,6 +780,13 @@ void uiToolboxTick(TFT_eSPI& t, uint32_t now) {
     t.setTextSize(1);
     t.setTextDatum(MC_DATUM);
     t.drawString(headerForLevel(s_level), w / 2, HEADER_H / 2, 4);
+
+    if (s_contextMenuOpen) {
+        // Draw the scan underneath (dimmed), then the context menu on top
+        if (s_activeTool == ActiveTool::WIFI_SCAN) drawWifiScan(t, now);
+        drawContextMenu(t);
+        return;
+    }
 
     if (s_level == ToolboxLevel::TOOL_RUNNING) {
         switch (s_activeTool) {
@@ -730,6 +887,12 @@ static bool handleUtilTap(int idx) {
 }
 
 bool uiToolboxHandleTap(TFT_eSPI& t, int16_t x, int16_t y, uint32_t now) {
+    // If long press already fired this gesture, eat the tap
+    if (s_longPressFired) return true;
+
+    // Context menu is open — handle its taps
+    if (s_contextMenuOpen) return handleContextTap(t, x, y);
+
     if (s_level == ToolboxLevel::TOOL_RUNNING) {
         const int hh = t.height();
         const bool tapBottom = (y > hh - 30);

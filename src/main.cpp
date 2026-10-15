@@ -6462,6 +6462,7 @@ void loop() {
             break;
         }
         case AppState::TOOLBOX: {
+            uiToolboxTouch(tp.valid, tp.x, tp.y, now);
             uiToolboxTick(*canvas, now);
             if (touchJustDown) {
                 lastTouch = now;
