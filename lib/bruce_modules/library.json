@@ -1,0 +1,10 @@
+{
+    "name": "BruceModules",
+    "version": "1.0.0",
+    "description": "Bruce firmware attack modules ported to SquatchWatch",
+    "frameworks": "arduino",
+    "platforms": "espressif32",
+    "dependencies": {
+        "BruceShim": "*"
+    }
+}

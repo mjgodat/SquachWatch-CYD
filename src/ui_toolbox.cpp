@@ -8,6 +8,9 @@
 #include <esp_wifi.h>
 #include <NimBLEDevice.h>
 #include <WebServer.h>
+
+// Bruce modules (attack logic from Bruce firmware)
+#include "ble/ble_spam.h"
 #include <DNSServer.h>
 
 // ---- Which tool is actively running ----

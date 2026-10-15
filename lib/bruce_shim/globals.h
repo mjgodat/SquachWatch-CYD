@@ -3,6 +3,9 @@
 #pragma once
 #include <Arduino.h>
 #include <TFT_eSPI.h>
+#include <vector>
+#include <functional>
+#include <string>
 
 // Forward declare the SquatchWatch canvas that Bruce modules draw to
 extern TFT_eSPI* bruce_tft;
@@ -65,7 +68,20 @@ extern BruceConfigPins bruceConfigPins;
 extern volatile bool AnyKeyPress;
 extern volatile bool EscPress;
 extern volatile bool SelPress;
+extern volatile bool PrevPress;
+extern volatile bool NextPress;
 extern volatile bool returnToMenu;
+
+// Line height — Bruce uses LH (8 pixels) for layout
+#ifndef LH
+#define LH 8
+#endif
+
+// padprintln — Bruce's println helper
+inline void padprintln(const String &s) {
+    if (bruce_tft) bruce_tft->println(s);
+}
+
 
 // check() macro Bruce uses
 inline bool check(volatile bool& flag) {
@@ -83,3 +99,15 @@ extern TouchPoint touchPoint;
 
 // Color helper Bruce uses
 inline uint16_t getColorVariation(uint16_t color) { return color; }
+
+// esp_iface_mac_addr_set — IDF 5.x API, provide fallback for IDF 4.x
+#include <esp_wifi.h>
+#ifndef ESP_IDF_VERSION_MAJOR
+#define ESP_IDF_VERSION_MAJOR 4
+#endif
+#if ESP_IDF_VERSION_MAJOR < 5
+#include <esp_system.h>
+inline esp_err_t esp_iface_mac_addr_set(const uint8_t *mac, esp_mac_type_t type) {
+    return esp_base_mac_addr_set(mac);
+}
+#endif

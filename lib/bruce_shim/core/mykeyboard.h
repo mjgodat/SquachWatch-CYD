@@ -8,5 +8,10 @@ inline bool checkEscPress()  { return check(EscPress); }
 inline bool checkAnyKeyPress() { return check(AnyKeyPress); }
 
 // Touch handling stubs
-void touchHeatMap(TouchPoint &tp);
 inline void touchHeatMap(TouchPoint &tp) { (void)tp; }
+
+// Text input stub — Bruce's on-screen keyboard
+inline String keyboard(const String &defaultText = "", int maxLen = 32, const String &title = "") {
+    (void)maxLen; (void)title;
+    return defaultText;
+}
