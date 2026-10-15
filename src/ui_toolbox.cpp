@@ -3067,6 +3067,114 @@ static char s_wichatInput[129] = {0};
 static int s_wichatInputLen = 0;
 static int s_wichatMsgVer = -1;
 static int s_wichatScroll = 0;
+static bool s_kbShift = false;
+
+// Keyboard layout constants (480x320 landscape)
+#define KB_KEY_W    44
+#define KB_KEY_H    36
+#define KB_KEY_GAP  2
+#define KB_ROWS     4
+#define KB_TOTAL_H  (KB_ROWS * (KB_KEY_H + KB_KEY_GAP) + KB_KEY_GAP)
+#define KB_TOP_Y    (320 - KB_TOTAL_H)
+#define KB_BG_COL   0x2104
+#define KB_KEY_COL  0x4208
+#define KB_HL_COL   0x6B4D
+
+static const char* kbRow0 = "QWERTYUIOP";
+static const char* kbRow1 = "ASDFGHJKL";
+static const char* kbRow2 = "ZXCVBNM";
+
+static int kbRowStartX(int n) { return (480 - (n * KB_KEY_W + (n-1) * KB_KEY_GAP)) / 2; }
+
+static void kbDrawKey(TFT_eSPI& t, int x, int y, int w, int h, const char* label, uint16_t bg) {
+    t.fillRoundRect(x, y, w, h, 4, bg);
+    t.setTextColor(TFT_WHITE, bg);
+    t.setTextDatum(MC_DATUM);
+    t.drawString(label, x + w/2, y + h/2, 2);
+}
+
+static void kbDraw(TFT_eSPI& t) {
+    int yb = KB_TOP_Y;
+    t.fillRect(0, yb, 480, KB_TOTAL_H, KB_BG_COL);
+
+    // Row 0: QWERTYUIOP
+    int x = kbRowStartX(10), y = yb + KB_KEY_GAP;
+    for (int i = 0; i < 10; i++) {
+        char l[2] = { kbRow0[i], 0 };
+        if (!s_kbShift) l[0] += 32;
+        kbDrawKey(t, x, y, KB_KEY_W, KB_KEY_H, l, KB_KEY_COL);
+        x += KB_KEY_W + KB_KEY_GAP;
+    }
+    // Row 1: ASDFGHJKL
+    x = kbRowStartX(9); y += KB_KEY_H + KB_KEY_GAP;
+    for (int i = 0; i < 9; i++) {
+        char l[2] = { kbRow1[i], 0 };
+        if (!s_kbShift) l[0] += 32;
+        kbDrawKey(t, x, y, KB_KEY_W, KB_KEY_H, l, KB_KEY_COL);
+        x += KB_KEY_W + KB_KEY_GAP;
+    }
+    // Row 2: ZXCVBNM
+    x = kbRowStartX(7); y += KB_KEY_H + KB_KEY_GAP;
+    for (int i = 0; i < 7; i++) {
+        char l[2] = { kbRow2[i], 0 };
+        if (!s_kbShift) l[0] += 32;
+        kbDrawKey(t, x, y, KB_KEY_W, KB_KEY_H, l, KB_KEY_COL);
+        x += KB_KEY_W + KB_KEY_GAP;
+    }
+    // Row 3: SHFT SPACE BKSP SEND EXIT
+    y += KB_KEY_H + KB_KEY_GAP;
+    int sw = 50, gap = KB_KEY_GAP;
+    int spaceW = 480 - 5*sw - 6*gap;
+    x = gap;
+    kbDrawKey(t, x, y, sw, KB_KEY_H, "SHFT", s_kbShift ? KB_HL_COL : TFT_BLUE); x += sw + gap;
+    kbDrawKey(t, x, y, spaceW, KB_KEY_H, "SPACE", KB_KEY_COL); x += spaceW + gap;
+    kbDrawKey(t, x, y, sw, KB_KEY_H, "BKSP", TFT_BLUE); x += sw + gap;
+    kbDrawKey(t, x, y, sw, KB_KEY_H, "SEND", TFT_DARKGREEN); x += sw + gap;
+    kbDrawKey(t, x, y, sw, KB_KEY_H, "EXIT", TFT_RED);
+}
+
+// Returns: 0=nothing, 'c'=char, '\b'=backspace, '\n'=send, 0x1B=exit, 0x10=shift
+static char kbHandleTap(int16_t tx, int16_t ty) {
+    if (ty < KB_TOP_Y) return 0;
+    int yb = KB_TOP_Y;
+    int row = (ty - yb - KB_KEY_GAP) / (KB_KEY_H + KB_KEY_GAP);
+
+    if (row == 0) {
+        int xs = kbRowStartX(10);
+        int col = (tx - xs) / (KB_KEY_W + KB_KEY_GAP);
+        if (col >= 0 && col < 10 && tx >= xs) {
+            char c = kbRow0[col];
+            if (!s_kbShift) c += 32;
+            return c;
+        }
+    } else if (row == 1) {
+        int xs = kbRowStartX(9);
+        int col = (tx - xs) / (KB_KEY_W + KB_KEY_GAP);
+        if (col >= 0 && col < 9 && tx >= xs) {
+            char c = kbRow1[col];
+            if (!s_kbShift) c += 32;
+            return c;
+        }
+    } else if (row == 2) {
+        int xs = kbRowStartX(7);
+        int col = (tx - xs) / (KB_KEY_W + KB_KEY_GAP);
+        if (col >= 0 && col < 7 && tx >= xs) {
+            char c = kbRow2[col];
+            if (!s_kbShift) c += 32;
+            return c;
+        }
+    } else if (row == 3) {
+        int sw = 50, gap = KB_KEY_GAP;
+        int spaceW = 480 - 5*sw - 6*gap;
+        int x = gap;
+        if (tx >= x && tx < x + sw) { s_kbShift = !s_kbShift; return 0x10; } x += sw + gap;
+        if (tx >= x && tx < x + spaceW) return ' '; x += spaceW + gap;
+        if (tx >= x && tx < x + sw) return '\b'; x += sw + gap;
+        if (tx >= x && tx < x + sw) return '\n'; x += sw + gap;
+        if (tx >= x && tx < x + sw) return 0x1B;  // EXIT
+    }
+    return 0;
+}
 
 static void wichatStart() {
     if (!s_wichatInit) {
@@ -3144,21 +3252,20 @@ static void drawWichat(TFT_eSPI& t, uint32_t now) {
         }
     }
 
-    // Input bar
-    int inputY = h - 44;
+    // Input bar (above keyboard)
+    int inputY = KB_TOP_Y - 22;
     t.fillRect(0, inputY, w, 20, Theme::BG);
     t.drawRect(4, inputY, w - 8, 20, Theme::CYAN);
     t.setTextColor(Theme::VAPOR_YELLOW, Theme::BG);
     t.setTextDatum(ML_DATUM);
-    t.drawString(s_wichatInput, 8, inputY + 10, 2);
+    String inputDisp = String(s_wichatInput);
+    if (inputDisp.length() > 40) inputDisp = inputDisp.substring(inputDisp.length() - 40);
+    t.drawString(inputDisp + "_", 8, inputY + 10, 2);
 
-    // Bottom instructions
-    t.fillRect(0, h - 24, w, 24, Theme::TASKBAR);
-    t.setTextColor(Theme::AMBER, Theme::TASKBAR);
-    t.setTextDatum(MC_DATUM);
-    t.drawString("Serial: type message + Enter | TAP TO STOP", w / 2, h - 12, 1);
+    // Draw keyboard
+    kbDraw(t);
 
-    // Read serial input for chat
+    // Also accept serial input
     while (Serial.available()) {
         char c = Serial.read();
         if (c == '\n' || c == '\r') {
@@ -3826,6 +3933,29 @@ bool uiToolboxHandleTap(TFT_eSPI& t, int16_t x, int16_t y, uint32_t now) {
                 s_scroll = 0;
             } else if (tapHeader && !s_bleScanning) {
                 bleScanStart();  // rescan only from header tap
+            }
+            return true;
+        }
+        // WiChat: handle keyboard taps
+        if (s_activeTool == ActiveTool::WICHAT) {
+            char key = kbHandleTap(x, y);
+            if (key == 0x1B) {  // EXIT
+                stopActiveTool();
+                s_level = ToolboxLevel::CATEGORIES;
+                s_scroll = 0;
+            } else if (key == '\n') {  // SEND
+                if (s_wichatInputLen > 0) {
+                    cyd_mesh_send_chat(s_wichatInput);
+                    s_wichatInput[0] = 0;
+                    s_wichatInputLen = 0;
+                }
+            } else if (key == '\b') {  // BACKSPACE
+                if (s_wichatInputLen > 0) s_wichatInput[--s_wichatInputLen] = 0;
+            } else if (key == 0x10) {  // SHIFT (already toggled in handler)
+                // nothing extra
+            } else if (key >= 32 && s_wichatInputLen < 128) {
+                s_wichatInput[s_wichatInputLen++] = key;
+                s_wichatInput[s_wichatInputLen] = 0;
             }
             return true;
         }
