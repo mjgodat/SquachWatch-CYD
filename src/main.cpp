@@ -85,6 +85,7 @@ static void cydGpsTick(uint32_t now);
 #include "bingo.h"
 #include "dex.h"
 #include "ui_dex.h"
+#include "ui_toolbox.h"
 #include "regulars.h"
 #include "notices.h"
 #include "theme.h"            // the crash card on the splash
@@ -2344,6 +2345,12 @@ static void enterDex() {
     state = AppState::DEX;
     transitionStart = millis();
     uiDexInit(*canvas);
+}
+
+static void enterToolbox() {
+    state = AppState::TOOLBOX;
+    transitionStart = millis();
+    uiToolboxInit(*canvas);
 }
 
 static void enterSquadUpdate() {
@@ -6454,6 +6461,17 @@ void loop() {
             }
             break;
         }
+        case AppState::TOOLBOX: {
+            uiToolboxTick(*canvas, now);
+            if (touchJustDown) {
+                lastTouch = now;
+                if (!uiToolboxHandleTap(*canvas, tp.x, tp.y, now)) {
+                    uiToolboxStopTool();
+                    goHome();
+                }
+            }
+            break;
+        }
         case AppState::SYS_PROPS: {
             // A detection still takes the screen. The window can open on a
             // board nobody is watching -- a squad member's hello brings the
@@ -7847,6 +7865,7 @@ void loop() {
                             break;
 #endif
                         case SettingsRow::STATUS_LIGHT: enterLight(); break;
+                        case SettingsRow::TOOLBOX:     enterToolbox(); break;
                         case SettingsRow::SECURITY:    enterSecurity(); break;
                         case SettingsRow::IGNORED_DEVICES:  enterIgnoreList(); break;
 #if SQUACH_MESH

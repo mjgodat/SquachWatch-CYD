@@ -193,7 +193,8 @@ enum class AppState : uint8_t {
     BINGO            = 36, // the detection bingo card, from Settings' BINGO
                             // row. See ui_bingo.h.
     DEX              = 37, // the SQUACHY-DEX, from Settings' row. See ui_dex.h.
-    LORA_CHAT        = 38  // LORA CHATS, from WATCH SETTINGS (SQUACH_LORA builds). See ui_lorachat.h.
+    LORA_CHAT        = 38, // LORA CHATS, from WATCH SETTINGS (SQUACH_LORA builds). See ui_lorachat.h.
+    TOOLBOX          = 39  // Bruce Toolbox: WiFi attacks, BLE spam, BadUSB payloads
 };
 
 enum class ButtonId : uint8_t {

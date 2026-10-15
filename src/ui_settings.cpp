@@ -117,6 +117,7 @@ static const SettingsRow ALL_ROWS[] = {
 #if defined(ESP32) && !defined(TWATCH_S3)
     SettingsRow::CHARGE_MODE,
 #endif
+    SettingsRow::TOOLBOX,
     SettingsRow::SECURITY,
     // CALIBRATE, CHECK COLORS, DIAGNOSTICS and RESET STATS moved behind the
     // SYSTEM row -- see SYSTEM_ROWS. They are the four you touch once a year,
@@ -1358,6 +1359,9 @@ static void rowContent(SettingsRow r, const DetectionEngine& eng, char* valBuf, 
             break;
         case SettingsRow::STATUS_LIGHT:
             label = "STATUS LIGHT"; value = Settings::lightOn() ? "ON" : "OFF";
+            break;
+        case SettingsRow::TOOLBOX:
+            label = "TOOLBOX"; value = ">";
             break;
         case SettingsRow::SECURITY:
             label = "SECURITY"; value = Security::enabled() ? "PIN ON" : "OFF";

@@ -100,6 +100,7 @@ enum class SettingsRow : uint8_t {
     FONT_XP,         // on the FONTS page: the XP counter tiles, 1x or 2x
     FONT_PETS,       // on the FONTS page: the pets' balloons
     FONT_PREVIEW,    // on the FONTS page: a sample of the last kind moved, at its size
+    TOOLBOX,         // opens the Bruce Toolbox: WiFi attacks, BLE spam, BadUSB
     BACK,
     COUNT,
     NONE = 255
