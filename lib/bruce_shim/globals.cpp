@@ -10,6 +10,7 @@ volatile bool EscPress = false;
 volatile bool SelPress = false;
 volatile bool PrevPress = false;
 volatile bool NextPress = false;
+volatile bool LongPress = false;
 volatile bool returnToMenu = false;
 TouchPoint touchPoint;
 

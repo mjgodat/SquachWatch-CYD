@@ -18,11 +18,16 @@ void drawMainBorder(bool clear = true);
 void drawMainBorderWithTitle(const String &title, bool clear = true);
 void padprint(const String &text, bool newline = true);
 
-// Option struct for loopOptions
+// Option struct for loopOptions (matches Bruce's globals.h)
 struct Option {
     String label;
-    std::function<void()> callback = nullptr;
+    std::function<void()> operation;
     bool selected = false;
+    bool enabled = true;
+
+    Option(const char *lbl, const std::function<void()> &op, bool sel = false, bool en = true)
+        : label(lbl), operation(op), selected(sel), enabled(en) {}
+    Option() : selected(false), enabled(true) {}
 };
 
 int loopOptions(std::vector<Option> &options, int type, const String &title, int index, bool locked);

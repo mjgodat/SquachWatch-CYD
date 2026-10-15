@@ -70,6 +70,7 @@ extern volatile bool EscPress;
 extern volatile bool SelPress;
 extern volatile bool PrevPress;
 extern volatile bool NextPress;
+extern volatile bool LongPress;
 extern volatile bool returnToMenu;
 
 // Line height — Bruce uses LH (8 pixels) for layout
