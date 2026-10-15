@@ -38,15 +38,14 @@ enum class BleTool : uint8_t {
     AIRTAG_SPOOF,
     FLIPPER_DETECT,
     BLE_ENUM,
+    HAYSTACK,
     BACK,
     COUNT
 };
 
 enum class UsbTool : uint8_t {
-    DUCKY_SCRIPT = 0,   // load from SD
-    KEYSTROKE_INJECT,
+    DUCKY_SCRIPT = 0,
     USB_KEYBOARD,
-    USB_STORAGE,
     BACK,
     COUNT
 };
@@ -55,6 +54,7 @@ enum class UtilTool : uint8_t {
     SD_BROWSER = 0,
     WIFI_LOGGER,
     PCAP_VIEWER,
+    USB_WIRESHARK,
     BACK,
     COUNT
 };

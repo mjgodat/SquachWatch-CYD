@@ -16,9 +16,11 @@
 // ---- Which tool is actively running ----
 enum class ActiveTool : uint8_t {
     NONE = 0, WIFI_SCAN, DEAUTH, BEACON_SPAM, RICKROLL, CLONE_AP, EVIL_PORTAL,
-    PROBE_SNIFF, KARMA, DHCP_STARVE,
+    PROBE_SNIFF, KARMA, DHCP_STARVE, PCAP_CAPTURE, WIFI_LOGGER,
     BLE_SCAN, BLE_TRACK, APPLE_SPAM, SAMSUNG_SPAM, SWIFTPAIR_SPAM,
-    FLIPPER_DETECT, SD_BROWSER
+    FLIPPER_DETECT, AIRTAG_SPOOF, HAYSTACK,
+    BADUSB_DUCKY, USB_KEYBOARD,
+    SD_BROWSER, PCAP_VIEWER, USB_WIRESHARK
 };
 
 // ---- Which context menu type is open ----
@@ -1669,6 +1671,526 @@ static void drawSdBrowser(TFT_eSPI& t, uint32_t now) {
 }
 
 // =============================================================================
+//  AIRTAG SPOOF — broadcast fake AirTag BLE advertisements
+// =============================================================================
+static uint32_t s_airtagCount = 0;
+static uint32_t s_airtagLastMs = 0;
+
+static void airtagSpoofStart() {
+    s_airtagCount = 0;
+    s_airtagLastMs = 0;
+    if (!NimBLEDevice::isInitialized()) NimBLEDevice::init("");
+    NimBLEDevice::setPower(ESP_PWR_LVL_P9);
+    s_pAdv = NimBLEDevice::getAdvertising();
+    Serial.println("[toolbox] AirTag spoof started");
+}
+
+static void airtagSpoofTick() {
+    uint32_t now = millis();
+    if (now - s_airtagLastMs < 2000) return;  // AirTags advertise every 2s
+    s_airtagLastMs = now;
+    s_pAdv->stop();
+
+    // Apple FindMy / AirTag advertisement
+    // Company ID 0x004C, type 0x12 (FindMy), length 0x19
+    uint8_t mfgData[29];
+    mfgData[0] = 0x4C; mfgData[1] = 0x00;  // Apple
+    mfgData[2] = 0x12; mfgData[3] = 0x19;  // FindMy type + length
+    mfgData[4] = 0x10;  // status byte
+    // Random public key bytes (28 bytes of the EC P-224 public key)
+    for (int i = 5; i < 29; i++) mfgData[i] = random(0, 256);
+    mfgData[5] = (mfgData[5] & 0x3F) | 0x40;  // key type bits
+
+    NimBLEAdvertisementData advData;
+    advData.setFlags(0x06);
+    advData.setManufacturerData(std::string((char*)mfgData, 29));
+
+    s_pAdv->setAdvertisementData(advData);
+    s_pAdv->start();
+    s_airtagCount++;
+}
+
+static void drawAirtagSpoof(TFT_eSPI& t, uint32_t now) {
+    const int w = t.width();
+    const int h = t.height();
+    airtagSpoofTick();
+
+    t.setTextColor(Theme::VAPOR_PINK, Theme::BG);
+    t.setTextDatum(MC_DATUM);
+    t.drawString("AIRTAG SPOOF", w / 2, HEADER_H + 20, 4);
+    t.setTextColor(Theme::CYAN, Theme::BG);
+    t.drawString("Broadcasting fake AirTag", w / 2, HEADER_H + 55, 2);
+    t.drawString("Appears in FindMy network", w / 2, HEADER_H + 75, 2);
+
+    char buf[32];
+    snprintf(buf, sizeof buf, "%lu", (unsigned long)s_airtagCount);
+    t.setTextColor(Theme::GREEN, Theme::BG);
+    t.drawString(buf, w / 2, h / 2 + 10, 7);
+    t.setTextColor(Theme::AMBER, Theme::BG);
+    t.drawString("beacons sent", w / 2, h / 2 + 50, 2);
+
+    t.fillRect(0, h - 24, w, 24, Theme::TASKBAR);
+    t.setTextColor(Theme::AMBER, Theme::TASKBAR);
+    t.drawString("TAP TO STOP", w / 2, h - 12, 2);
+}
+
+// =============================================================================
+//  HAYSTACK — Apple FindMy location beacon (OpenHaystack)
+// =============================================================================
+static uint32_t s_haystackCount = 0;
+static uint32_t s_haystackLastMs = 0;
+static uint8_t s_haystackKey[28];  // public key for tracking
+
+static void haystackStart() {
+    s_haystackCount = 0;
+    s_haystackLastMs = 0;
+    // Generate a persistent key for this session
+    for (int i = 0; i < 28; i++) s_haystackKey[i] = random(0, 256);
+    s_haystackKey[0] = (s_haystackKey[0] & 0x3F) | 0x40;
+    if (!NimBLEDevice::isInitialized()) NimBLEDevice::init("");
+    NimBLEDevice::setPower(ESP_PWR_LVL_P9);
+    s_pAdv = NimBLEDevice::getAdvertising();
+    Serial.println("[toolbox] Haystack beacon started");
+    Serial.printf("[haystack] Key: ");
+    for (int i = 0; i < 28; i++) Serial.printf("%02X", s_haystackKey[i]);
+    Serial.println();
+}
+
+static void haystackTick() {
+    uint32_t now = millis();
+    if (now - s_haystackLastMs < 2000) return;
+    s_haystackLastMs = now;
+    s_pAdv->stop();
+
+    uint8_t mfgData[29];
+    mfgData[0] = 0x4C; mfgData[1] = 0x00;
+    mfgData[2] = 0x12; mfgData[3] = 0x19;
+    mfgData[4] = 0x10;
+    memcpy(mfgData + 5, s_haystackKey, 24);  // first 24 bytes of key
+
+    NimBLEAdvertisementData advData;
+    advData.setFlags(0x06);
+    advData.setManufacturerData(std::string((char*)mfgData, 29));
+
+    // Set the remaining key bytes in the BLE address
+    uint8_t addr[6];
+    addr[0] = s_haystackKey[24] | 0xC0;  // random static address
+    addr[1] = s_haystackKey[25];
+    addr[2] = s_haystackKey[26];
+    addr[3] = s_haystackKey[27];
+    addr[4] = (uint8_t)(s_haystackCount & 0xFF);
+    addr[5] = (uint8_t)((s_haystackCount >> 8) & 0xFF);
+
+    s_pAdv->setAdvertisementData(advData);
+    s_pAdv->start();
+    s_haystackCount++;
+}
+
+static void drawHaystack(TFT_eSPI& t, uint32_t now) {
+    const int w = t.width();
+    const int h = t.height();
+    haystackTick();
+
+    t.setTextColor(Theme::GREEN, Theme::BG);
+    t.setTextDatum(MC_DATUM);
+    t.drawString("HAYSTACK BEACON", w / 2, HEADER_H + 20, 4);
+    t.setTextColor(Theme::CYAN, Theme::BG);
+    t.drawString("Apple FindMy location relay", w / 2, HEADER_H + 50, 2);
+    t.drawString("Nearby iPhones relay position", w / 2, HEADER_H + 70, 2);
+
+    // Show truncated key
+    char keyBuf[20];
+    snprintf(keyBuf, sizeof keyBuf, "Key: %02X%02X%02X%02X...",
+             s_haystackKey[0], s_haystackKey[1], s_haystackKey[2], s_haystackKey[3]);
+    t.setTextColor(Theme::VAPOR_PURPLE, Theme::BG);
+    t.drawString(keyBuf, w / 2, HEADER_H + 95, 2);
+
+    char buf[32];
+    snprintf(buf, sizeof buf, "%lu", (unsigned long)s_haystackCount);
+    t.setTextColor(Theme::VAPOR_PINK, Theme::BG);
+    t.drawString(buf, w / 2, h / 2 + 10, 7);
+    t.setTextColor(Theme::AMBER, Theme::BG);
+    t.drawString("beacons sent", w / 2, h / 2 + 50, 2);
+
+    t.setTextColor(Theme::VAPOR_YELLOW, Theme::BG);
+    t.drawString("Key printed to Serial", w / 2, h - 55, 2);
+
+    t.fillRect(0, h - 24, w, 24, Theme::TASKBAR);
+    t.setTextColor(Theme::AMBER, Theme::TASKBAR);
+    t.drawString("TAP TO STOP", w / 2, h - 12, 2);
+}
+
+// =============================================================================
+//  BADUSB — Ducky Script from SD card
+// =============================================================================
+#include <USB.h>
+#include <USBHIDKeyboard.h>
+
+static USBHIDKeyboard* s_usbKb = nullptr;
+static bool s_usbRunning = false;
+static String s_duckyFile = "";
+static int s_duckyLine = 0;
+static int s_duckyTotal = 0;
+
+static void badUsbStart() {
+    s_usbRunning = false;
+    s_duckyLine = 0;
+    s_duckyTotal = 0;
+    s_duckyFile = "";
+
+    // List .txt files on SD as potential ducky scripts
+    SD_MMC.setPins(5, 4, 6, 7, 2, 3);
+    if (!SD_MMC.begin("/sd", false, false)) {
+        Serial.println("[toolbox] SD mount failed for ducky");
+        return;
+    }
+
+    // Look for ducky scripts in /badusb/ or root
+    fs::File dir = SD_MMC.open("/badusb");
+    if (!dir || !dir.isDirectory()) dir = SD_MMC.open("/");
+    if (!dir) return;
+
+    // Find first .txt file
+    fs::File entry;
+    while ((entry = dir.openNextFile())) {
+        String name = entry.name();
+        if (name.endsWith(".txt") || name.endsWith(".ducky")) {
+            s_duckyFile = name;
+            entry.close();
+            break;
+        }
+        entry.close();
+    }
+    dir.close();
+
+    if (s_duckyFile.length() == 0) {
+        Serial.println("[toolbox] No ducky scripts found on SD");
+        return;
+    }
+
+    // Init USB HID keyboard
+    if (!s_usbKb) {
+        s_usbKb = new USBHIDKeyboard();
+        USB.begin();
+        s_usbKb->begin();
+    }
+
+    // Count lines
+    fs::File f = SD_MMC.open(s_duckyFile);
+    if (f) {
+        while (f.available()) { if (f.read() == '\n') s_duckyTotal++; }
+        s_duckyTotal++;
+        f.close();
+    }
+
+    // Execute
+    f = SD_MMC.open(s_duckyFile);
+    if (!f) return;
+    s_usbRunning = true;
+    s_duckyLine = 0;
+
+    while (f.available() && s_usbRunning) {
+        String line = f.readStringUntil('\n');
+        line.trim();
+        s_duckyLine++;
+
+        if (line.startsWith("REM") || line.length() == 0) continue;
+        else if (line.startsWith("DELAY ")) {
+            int ms = line.substring(6).toInt();
+            delay(ms);
+        }
+        else if (line.startsWith("STRING ")) {
+            s_usbKb->print(line.substring(7));
+        }
+        else if (line == "ENTER") s_usbKb->press(KEY_RETURN);
+        else if (line == "TAB") s_usbKb->press(KEY_TAB);
+        else if (line == "ESCAPE" || line == "ESC") s_usbKb->press(KEY_ESC);
+        else if (line == "BACKSPACE") s_usbKb->press(KEY_BACKSPACE);
+        else if (line == "DELETE") s_usbKb->press(KEY_DELETE);
+        else if (line == "SPACE") s_usbKb->press(' ');
+        else if (line == "UP" || line == "UPARROW") s_usbKb->press(KEY_UP_ARROW);
+        else if (line == "DOWN" || line == "DOWNARROW") s_usbKb->press(KEY_DOWN_ARROW);
+        else if (line == "LEFT" || line == "LEFTARROW") s_usbKb->press(KEY_LEFT_ARROW);
+        else if (line == "RIGHT" || line == "RIGHTARROW") s_usbKb->press(KEY_RIGHT_ARROW);
+        else if (line.startsWith("GUI ") || line.startsWith("WINDOWS ")) {
+            s_usbKb->press(KEY_LEFT_GUI);
+            s_usbKb->press(line.charAt(line.indexOf(' ') + 1));
+        }
+        else if (line.startsWith("ALT ")) {
+            s_usbKb->press(KEY_LEFT_ALT);
+            s_usbKb->press(line.charAt(4));
+        }
+        else if (line.startsWith("CTRL ") || line.startsWith("CONTROL ")) {
+            s_usbKb->press(KEY_LEFT_CTRL);
+            int sp = line.indexOf(' ');
+            s_usbKb->press(line.charAt(sp + 1));
+        }
+        else if (line.startsWith("SHIFT ")) {
+            s_usbKb->press(KEY_LEFT_SHIFT);
+            s_usbKb->press(line.charAt(6));
+        }
+
+        s_usbKb->releaseAll();
+        delay(5);
+    }
+    f.close();
+    s_usbRunning = false;
+    Serial.printf("[toolbox] Ducky script done: %s (%d lines)\n", s_duckyFile.c_str(), s_duckyLine);
+}
+
+static void drawBadUsb(TFT_eSPI& t, uint32_t now) {
+    const int w = t.width();
+    const int h = t.height();
+
+    t.setTextColor(Theme::RED, Theme::BG);
+    t.setTextDatum(MC_DATUM);
+    t.drawString("BAD USB", w / 2, HEADER_H + 20, 4);
+
+    if (s_duckyFile.length() > 0) {
+        t.setTextColor(Theme::CYAN, Theme::BG);
+        t.drawString(s_duckyFile, w / 2, HEADER_H + 55, 2);
+
+        char buf[32];
+        snprintf(buf, sizeof buf, "Line %d / %d", s_duckyLine, s_duckyTotal);
+        t.setTextColor(s_usbRunning ? Theme::GREEN : Theme::AMBER, Theme::BG);
+        t.drawString(buf, w / 2, h / 2, 4);
+        t.drawString(s_usbRunning ? "EXECUTING..." : "COMPLETE", w / 2, h / 2 + 35, 2);
+    } else {
+        t.setTextColor(Theme::AMBER, Theme::BG);
+        t.drawString("No .txt or .ducky files", w / 2, h / 2 - 10, 2);
+        t.drawString("found on SD card", w / 2, h / 2 + 10, 2);
+        t.drawString("Place scripts in /badusb/", w / 2, h / 2 + 35, 2);
+    }
+
+    t.fillRect(0, h - 24, w, 24, Theme::TASKBAR);
+    t.setTextColor(Theme::AMBER, Theme::TASKBAR);
+    t.drawString("TAP TO STOP", w / 2, h - 12, 2);
+}
+
+// =============================================================================
+//  USB KEYBOARD — live keystroke entry via USB HID
+// =============================================================================
+static void usbKeyboardStart() {
+    if (!s_usbKb) {
+        s_usbKb = new USBHIDKeyboard();
+        USB.begin();
+        s_usbKb->begin();
+    }
+    Serial.println("[toolbox] USB keyboard mode active");
+}
+
+static void drawUsbKeyboard(TFT_eSPI& t, uint32_t now) {
+    const int w = t.width();
+    const int h = t.height();
+
+    t.setTextColor(Theme::CYAN, Theme::BG);
+    t.setTextDatum(MC_DATUM);
+    t.drawString("USB KEYBOARD", w / 2, HEADER_H + 20, 4);
+    t.setTextColor(Theme::VAPOR_PURPLE, Theme::BG);
+    t.drawString("Device appears as HID keyboard", w / 2, HEADER_H + 55, 2);
+    t.drawString("to connected host", w / 2, HEADER_H + 75, 2);
+    t.setTextColor(Theme::GREEN, Theme::BG);
+    t.drawString("ACTIVE", w / 2, h / 2, 4);
+    t.setTextColor(Theme::AMBER, Theme::BG);
+    t.drawString("Serial input -> keystrokes", w / 2, h / 2 + 35, 2);
+
+    t.fillRect(0, h - 24, w, 24, Theme::TASKBAR);
+    t.setTextColor(Theme::AMBER, Theme::TASKBAR);
+    t.drawString("TAP TO STOP", w / 2, h - 12, 2);
+}
+
+// =============================================================================
+//  PCAP CAPTURE — save WiFi frames to SD in PCAP format
+// =============================================================================
+static uint32_t s_pcapFrames = 0;
+static fs::File s_pcapFile;
+static bool s_pcapOpen = false;
+
+static void pcapWriteHeader() {
+    // PCAP global header
+    uint8_t hdr[24] = {
+        0xD4, 0xC3, 0xB2, 0xA1,  // magic
+        0x02, 0x00, 0x04, 0x00,  // version 2.4
+        0x00, 0x00, 0x00, 0x00,  // timezone
+        0x00, 0x00, 0x00, 0x00,  // sigfigs
+        0xFF, 0xFF, 0x00, 0x00,  // snaplen 65535
+        0x69, 0x00, 0x00, 0x00   // link type 105 = IEEE 802.11
+    };
+    s_pcapFile.write(hdr, 24);
+}
+
+static void IRAM_ATTR pcapSniffCb(void* buf, wifi_promiscuous_pkt_type_t type) {
+    if (!s_pcapOpen) return;
+    const wifi_promiscuous_pkt_t* pkt = (wifi_promiscuous_pkt_t*)buf;
+    int len = pkt->rx_ctrl.sig_len;
+    if (len <= 0 || len > 2500) return;
+
+    uint32_t ts_sec = millis() / 1000;
+    uint32_t ts_usec = (millis() % 1000) * 1000;
+    uint32_t incl_len = len;
+    uint32_t orig_len = len;
+
+    // PCAP packet header (16 bytes)
+    uint8_t phdr[16];
+    memcpy(phdr, &ts_sec, 4);
+    memcpy(phdr + 4, &ts_usec, 4);
+    memcpy(phdr + 8, &incl_len, 4);
+    memcpy(phdr + 12, &orig_len, 4);
+    s_pcapFile.write(phdr, 16);
+    s_pcapFile.write(pkt->payload, len);
+    s_pcapFrames++;
+}
+
+static void pcapCaptureStart() {
+    s_pcapFrames = 0;
+    s_pcapOpen = false;
+    SD_MMC.setPins(5, 4, 6, 7, 2, 3);
+    if (!SD_MMC.begin("/sd", false, false)) {
+        Serial.println("[toolbox] SD mount failed for PCAP");
+        return;
+    }
+    char fname[32];
+    snprintf(fname, sizeof fname, "/pcap_%lu.pcap", millis());
+    s_pcapFile = SD_MMC.open(fname, FILE_WRITE);
+    if (!s_pcapFile) {
+        Serial.println("[toolbox] Failed to create PCAP file");
+        return;
+    }
+    pcapWriteHeader();
+    s_pcapOpen = true;
+
+    WiFi.mode(WIFI_STA);
+    WiFi.disconnect();
+    esp_wifi_set_promiscuous(true);
+    esp_wifi_set_promiscuous_rx_cb(pcapSniffCb);
+    esp_wifi_set_channel(1, WIFI_SECOND_CHAN_NONE);
+    Serial.printf("[toolbox] PCAP capture started: %s\n", fname);
+}
+
+static void pcapCaptureStop() {
+    esp_wifi_set_promiscuous(false);
+    if (s_pcapOpen) {
+        s_pcapFile.flush();
+        s_pcapFile.close();
+        s_pcapOpen = false;
+    }
+    WiFi.mode(WIFI_OFF);
+}
+
+static uint8_t s_pcapChan = 1;
+static uint32_t s_pcapHopMs = 0;
+
+static void drawPcapCapture(TFT_eSPI& t, uint32_t now) {
+    const int w = t.width();
+    const int h = t.height();
+
+    // Hop channels
+    if (now - s_pcapHopMs > 500) {
+        s_pcapHopMs = now;
+        s_pcapChan = (s_pcapChan % 13) + 1;
+        esp_wifi_set_channel(s_pcapChan, WIFI_SECOND_CHAN_NONE);
+    }
+
+    t.setTextColor(Theme::VAPOR_PINK, Theme::BG);
+    t.setTextDatum(MC_DATUM);
+    t.drawString("PCAP CAPTURE", w / 2, HEADER_H + 20, 4);
+
+    char buf[48];
+    snprintf(buf, sizeof buf, "CH%d  |  Saving to SD", s_pcapChan);
+    t.setTextColor(Theme::CYAN, Theme::BG);
+    t.drawString(buf, w / 2, HEADER_H + 55, 2);
+
+    snprintf(buf, sizeof buf, "%lu", (unsigned long)s_pcapFrames);
+    t.setTextColor(Theme::GREEN, Theme::BG);
+    t.drawString(buf, w / 2, h / 2, 7);
+    t.setTextColor(Theme::AMBER, Theme::BG);
+    t.drawString("frames captured", w / 2, h / 2 + 40, 2);
+
+    uint32_t kb = s_pcapFrames * 200 / 1024;  // rough estimate
+    snprintf(buf, sizeof buf, "~%lu KB written", (unsigned long)kb);
+    t.setTextColor(Theme::VAPOR_PURPLE, Theme::BG);
+    t.drawString(buf, w / 2, h / 2 + 65, 2);
+
+    t.fillRect(0, h - 24, w, 24, Theme::TASKBAR);
+    t.setTextColor(Theme::AMBER, Theme::TASKBAR);
+    t.drawString("TAP TO STOP", w / 2, h - 12, 2);
+}
+
+// =============================================================================
+//  WIFI LOGGER — log all visible networks to SD
+// =============================================================================
+static uint32_t s_wifiLogCount = 0;
+static fs::File s_wifiLogFile;
+static bool s_wifiLogOpen = false;
+static uint32_t s_wifiLogLastScan = 0;
+
+static void wifiLoggerStart() {
+    s_wifiLogCount = 0;
+    s_wifiLogOpen = false;
+    SD_MMC.setPins(5, 4, 6, 7, 2, 3);
+    if (!SD_MMC.begin("/sd", false, false)) return;
+    char fname[32];
+    snprintf(fname, sizeof fname, "/wifi_%lu.csv", millis());
+    s_wifiLogFile = SD_MMC.open(fname, FILE_WRITE);
+    if (!s_wifiLogFile) return;
+    s_wifiLogFile.println("timestamp,ssid,bssid,rssi,channel,encryption");
+    s_wifiLogOpen = true;
+    WiFi.mode(WIFI_STA);
+    WiFi.disconnect();
+    s_wifiLogLastScan = 0;
+    Serial.printf("[toolbox] WiFi logger started: %s\n", fname);
+}
+
+static void wifiLoggerStop() {
+    WiFi.scanDelete();
+    WiFi.mode(WIFI_OFF);
+    if (s_wifiLogOpen) { s_wifiLogFile.flush(); s_wifiLogFile.close(); s_wifiLogOpen = false; }
+}
+
+static void drawWifiLogger(TFT_eSPI& t, uint32_t now) {
+    const int w = t.width();
+    const int h = t.height();
+
+    // Periodic scan every 10 seconds
+    if (now - s_wifiLogLastScan > 10000) {
+        s_wifiLogLastScan = now;
+        int n = WiFi.scanNetworks(false, true);
+        if (n > 0 && s_wifiLogOpen) {
+            for (int i = 0; i < n; i++) {
+                s_wifiLogFile.printf("%lu,%s,%s,%d,%d,%d\n",
+                    now / 1000, WiFi.SSID(i).c_str(), WiFi.BSSIDstr(i).c_str(),
+                    WiFi.RSSI(i), WiFi.channel(i), WiFi.encryptionType(i));
+                s_wifiLogCount++;
+            }
+            s_wifiLogFile.flush();
+        }
+        WiFi.scanDelete();
+    }
+
+    t.setTextColor(Theme::CYAN, Theme::BG);
+    t.setTextDatum(MC_DATUM);
+    t.drawString("WIFI LOGGER", w / 2, HEADER_H + 20, 4);
+    t.setTextColor(Theme::VAPOR_PURPLE, Theme::BG);
+    t.drawString("Logging networks to SD (CSV)", w / 2, HEADER_H + 55, 2);
+
+    char buf[32];
+    snprintf(buf, sizeof buf, "%lu", (unsigned long)s_wifiLogCount);
+    t.setTextColor(Theme::GREEN, Theme::BG);
+    t.drawString(buf, w / 2, h / 2, 7);
+    t.setTextColor(Theme::AMBER, Theme::BG);
+    t.drawString("entries logged", w / 2, h / 2 + 40, 2);
+
+    uint32_t elapsed = (now - s_toolStartMs) / 1000;
+    snprintf(buf, sizeof buf, "%02lu:%02lu elapsed", elapsed / 60, elapsed % 60);
+    t.setTextColor(Theme::VAPOR_PURPLE, Theme::BG);
+    t.drawString(buf, w / 2, h / 2 + 65, 2);
+
+    t.fillRect(0, h - 24, w, 24, Theme::TASKBAR);
+    t.setTextColor(Theme::AMBER, Theme::TASKBAR);
+    t.drawString("TAP TO STOP", w / 2, h - 12, 2);
+}
+
+// =============================================================================
 //  Tool stop / cleanup
 // =============================================================================
 static void stopActiveTool() {
@@ -1717,7 +2239,23 @@ static void stopActiveTool() {
             if (sc && sc->isScanning()) sc->stop();
             break;
         }
+        case ActiveTool::AIRTAG_SPOOF:
+        case ActiveTool::HAYSTACK:
+            if (s_pAdv) { s_pAdv->stop(); s_pAdv = nullptr; }
+            break;
+        case ActiveTool::BADUSB_DUCKY:
+        case ActiveTool::USB_KEYBOARD:
+            if (s_usbKb) { s_usbKb->releaseAll(); }
+            break;
+        case ActiveTool::PCAP_CAPTURE:
+            pcapCaptureStop();
+            break;
+        case ActiveTool::WIFI_LOGGER:
+            wifiLoggerStop();
+            break;
         case ActiveTool::SD_BROWSER:
+        case ActiveTool::PCAP_VIEWER:
+        case ActiveTool::USB_WIRESHARK:
             break;
         default: break;
     }
@@ -1750,7 +2288,13 @@ static void launchTool(ActiveTool tool) {
         case ActiveTool::SWIFTPAIR_SPAM: swiftPairStart();  break;
         case ActiveTool::BLE_TRACK:      /* started via bleTrackStart() */ break;
         case ActiveTool::FLIPPER_DETECT: flipperDetectStart(); break;
-        case ActiveTool::SD_BROWSER:     sdBrowserStart();     break;
+        case ActiveTool::AIRTAG_SPOOF:   airtagSpoofStart();   break;
+        case ActiveTool::HAYSTACK:       haystackStart();       break;
+        case ActiveTool::BADUSB_DUCKY:   badUsbStart();         break;
+        case ActiveTool::USB_KEYBOARD:   usbKeyboardStart();    break;
+        case ActiveTool::PCAP_CAPTURE:   pcapCaptureStart();    break;
+        case ActiveTool::WIFI_LOGGER:    wifiLoggerStart();     break;
+        case ActiveTool::SD_BROWSER:     sdBrowserStart();      break;
         default: break;
     }
 }
@@ -1768,13 +2312,13 @@ static const char* WIFI_LABELS[] = {
 };
 static const char* BLE_LABELS[] = {
     "SCAN DEVICES", "APPLE SPAM", "SAMSUNG SPAM", "SWIFTPAIR SPAM",
-    "AIRTAG SPOOF", "FLIPPER DETECT", "BLE ENUMERATE", "< BACK"
+    "AIRTAG SPOOF", "FLIPPER DETECT", "BLE ENUMERATE", "HAYSTACK (FINDMY)", "< BACK"
 };
 static const char* USB_LABELS[] = {
-    "DUCKY SCRIPT (SD)", "KEYSTROKE INJECT", "USB KEYBOARD", "USB STORAGE", "< BACK"
+    "DUCKY SCRIPT (SD)", "USB KEYBOARD", "< BACK"
 };
 static const char* UTIL_LABELS[] = {
-    "SD BROWSER", "WIFI LOGGER", "PCAP VIEWER", "< BACK"
+    "SD BROWSER", "WIFI LOGGER", "PCAP VIEWER", "USB WIRESHARK", "< BACK"
 };
 
 static const char** labelsForLevel(ToolboxLevel lvl, int& count) {
@@ -1812,6 +2356,12 @@ static const char* headerForLevel(ToolboxLevel lvl) {
                 case ActiveTool::SWIFTPAIR_SPAM: return "SWIFTPAIR";
                 case ActiveTool::BLE_TRACK:      return "BLE TRACK";
                 case ActiveTool::FLIPPER_DETECT: return "FLIPPER DETECT";
+                case ActiveTool::AIRTAG_SPOOF:   return "AIRTAG SPOOF";
+                case ActiveTool::HAYSTACK:       return "HAYSTACK";
+                case ActiveTool::BADUSB_DUCKY:   return "BAD USB";
+                case ActiveTool::USB_KEYBOARD:   return "USB KEYBOARD";
+                case ActiveTool::PCAP_CAPTURE:   return "PCAP CAPTURE";
+                case ActiveTool::WIFI_LOGGER:    return "WIFI LOGGER";
                 case ActiveTool::SD_BROWSER:     return "SD BROWSER";
                 default:                      return "RUNNING...";
             }
@@ -2069,6 +2619,12 @@ void uiToolboxTick(TFT_eSPI& t, uint32_t now) {
             case ActiveTool::SWIFTPAIR_SPAM: drawSwiftPairSpam(t, now); break;
             case ActiveTool::BLE_TRACK:      drawBleTrack(t, now);      break;
             case ActiveTool::FLIPPER_DETECT: drawFlipperDetect(t, now); break;
+            case ActiveTool::AIRTAG_SPOOF:   drawAirtagSpoof(t, now);   break;
+            case ActiveTool::HAYSTACK:       drawHaystack(t, now);      break;
+            case ActiveTool::BADUSB_DUCKY:   drawBadUsb(t, now);        break;
+            case ActiveTool::USB_KEYBOARD:   drawUsbKeyboard(t, now);   break;
+            case ActiveTool::PCAP_CAPTURE:   drawPcapCapture(t, now);   break;
+            case ActiveTool::WIFI_LOGGER:    drawWifiLogger(t, now);    break;
             case ActiveTool::SD_BROWSER:     drawSdBrowser(t, now);     break;
             default:
                 t.setTextColor(Theme::CYAN, Theme::BG);
@@ -2129,6 +2685,11 @@ static bool handleWifiTap(int idx) {
         case WifiTool::PROBE_SNIFF:    launchTool(ActiveTool::PROBE_SNIFF); break;
         case WifiTool::KARMA:          launchTool(ActiveTool::KARMA); break;
         case WifiTool::DHCP_STARVE:    launchTool(ActiveTool::DHCP_STARVE); break;
+        case WifiTool::PCAP_CAPTURE:   launchTool(ActiveTool::PCAP_CAPTURE); break;
+        case WifiTool::AP_CLONE:       // Clone from menu needs scan first
+            if (s_scanCount > 0) { cloneApStart(0); launchTool(ActiveTool::CLONE_AP); }
+            else launchTool(ActiveTool::WIFI_SCAN);
+            break;
         default:
             s_toolActive = true;
             s_activeTool = ActiveTool::NONE;
@@ -2146,6 +2707,8 @@ static bool handleBleTap(int idx) {
         case BleTool::SAMSUNG_SPAM:   launchTool(ActiveTool::SAMSUNG_SPAM); break;
         case BleTool::SWIFTPAIR_SPAM: launchTool(ActiveTool::SWIFTPAIR_SPAM); break;
         case BleTool::FLIPPER_DETECT: launchTool(ActiveTool::FLIPPER_DETECT); break;
+        case BleTool::AIRTAG_SPOOF:  launchTool(ActiveTool::AIRTAG_SPOOF); break;
+        case BleTool::HAYSTACK:      launchTool(ActiveTool::HAYSTACK); break;
         default:
             s_toolActive = true;
             s_activeTool = ActiveTool::NONE;
@@ -2157,16 +2720,23 @@ static bool handleBleTap(int idx) {
 
 static bool handleUsbTap(int idx) {
     if ((UsbTool)idx == UsbTool::BACK) { s_level = ToolboxLevel::CATEGORIES; s_scroll = 0; return true; }
-    s_toolActive = true;
-    s_activeTool = ActiveTool::NONE;
-    s_level = ToolboxLevel::TOOL_RUNNING;
+    switch ((UsbTool)idx) {
+        case UsbTool::DUCKY_SCRIPT: launchTool(ActiveTool::BADUSB_DUCKY); break;
+        case UsbTool::USB_KEYBOARD: launchTool(ActiveTool::USB_KEYBOARD); break;
+        default:
+            s_toolActive = true;
+            s_activeTool = ActiveTool::NONE;
+            s_level = ToolboxLevel::TOOL_RUNNING;
+            break;
+    }
     return true;
 }
 
 static bool handleUtilTap(int idx) {
     if ((UtilTool)idx == UtilTool::BACK) { s_level = ToolboxLevel::CATEGORIES; s_scroll = 0; return true; }
     switch ((UtilTool)idx) {
-        case UtilTool::SD_BROWSER: launchTool(ActiveTool::SD_BROWSER); break;
+        case UtilTool::SD_BROWSER:    launchTool(ActiveTool::SD_BROWSER); break;
+        case UtilTool::WIFI_LOGGER:   launchTool(ActiveTool::WIFI_LOGGER); break;
         default:
             s_toolActive = true;
             s_activeTool = ActiveTool::NONE;
