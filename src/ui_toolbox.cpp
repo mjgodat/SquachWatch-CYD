@@ -506,6 +506,150 @@ static void drawRickroll(TFT_eSPI& t, uint32_t now) {
 }
 
 // =============================================================================
+//  PROBE SNIFF — show probe requests from nearby devices
+// =============================================================================
+static const int MAX_PROBES = 50;
+struct ProbeEntry {
+    uint8_t mac[6];
+    char ssid[33];
+    int8_t rssi;
+    uint32_t lastSeen;
+};
+static ProbeEntry s_probes[MAX_PROBES];
+static int s_probeCount = 0;
+static bool s_probeActive = false;
+
+static void IRAM_ATTR probeSniffCb(void* buf, wifi_promiscuous_pkt_type_t type) {
+    if (type != WIFI_PKT_MGMT) return;
+    const wifi_promiscuous_pkt_t* pkt = (wifi_promiscuous_pkt_t*)buf;
+    const uint8_t* frame = pkt->payload;
+    int len = pkt->rx_ctrl.sig_len;
+    if (len < 28) return;
+
+    // Subtype 0x40 = probe request
+    if ((frame[0] & 0xFC) != 0x40) return;
+
+    const uint8_t* sa = frame + 10;  // source address
+    // Tagged parameters start at offset 24
+    const uint8_t* tags = frame + 24;
+    int tagLen = len - 24;
+    if (tagLen < 2) return;
+
+    // Find SSID tag (tag 0)
+    char ssid[33] = {0};
+    for (int i = 0; i < tagLen - 1;) {
+        uint8_t tagId = tags[i];
+        uint8_t tLen = tags[i + 1];
+        if (i + 2 + tLen > tagLen) break;
+        if (tagId == 0 && tLen > 0 && tLen <= 32) {
+            memcpy(ssid, tags + i + 2, tLen);
+            ssid[tLen] = 0;
+            break;
+        }
+        i += 2 + tLen;
+    }
+    if (ssid[0] == 0) return;  // broadcast probe, skip
+
+    // Check if we already have this MAC+SSID combo
+    for (int i = 0; i < s_probeCount; i++) {
+        if (memcmp(s_probes[i].mac, sa, 6) == 0 && strcmp(s_probes[i].ssid, ssid) == 0) {
+            s_probes[i].rssi = pkt->rx_ctrl.rssi;
+            s_probes[i].lastSeen = millis();
+            return;
+        }
+    }
+    if (s_probeCount >= MAX_PROBES) return;
+
+    ProbeEntry& e = s_probes[s_probeCount++];
+    memcpy(e.mac, sa, 6);
+    strncpy(e.ssid, ssid, 32);
+    e.rssi = pkt->rx_ctrl.rssi;
+    e.lastSeen = millis();
+}
+
+static void probeSniffStart() {
+    s_probeCount = 0;
+    s_probeActive = true;
+    WiFi.mode(WIFI_STA);
+    WiFi.disconnect();
+    esp_wifi_set_promiscuous(true);
+    esp_wifi_set_promiscuous_rx_cb(probeSniffCb);
+    // Hop channels periodically — done in tick
+    esp_wifi_set_channel(1, WIFI_SECOND_CHAN_NONE);
+    Serial.println("[toolbox] Probe sniff started");
+}
+
+static void probeSniffStop() {
+    esp_wifi_set_promiscuous(false);
+    s_probeActive = false;
+    WiFi.mode(WIFI_OFF);
+}
+
+static uint8_t s_probeChan = 1;
+static uint32_t s_probeHopMs = 0;
+
+static void probeSniffTick() {
+    // Hop channel every 500ms across 1-13
+    uint32_t now = millis();
+    if (now - s_probeHopMs > 500) {
+        s_probeHopMs = now;
+        s_probeChan = (s_probeChan % 13) + 1;
+        esp_wifi_set_channel(s_probeChan, WIFI_SECOND_CHAN_NONE);
+    }
+}
+
+static void drawProbeSniff(TFT_eSPI& t, uint32_t now) {
+    const int w = t.width();
+    const int h = t.height();
+
+    probeSniffTick();
+
+    char buf[48];
+    int statusY = HEADER_H + 2;
+    t.setTextColor(Theme::VAPOR_YELLOW, Theme::BG);
+    t.setTextDatum(TL_DATUM);
+    snprintf(buf, sizeof buf, "CH%d  |  %d probes captured", s_probeChan, s_probeCount);
+    t.drawString(buf, 8, statusY, 2);
+
+    int listTop = statusY + 20;
+    int visibleRows = (h - listTop - 30) / (RESULT_H + RESULT_PAD);
+
+    for (int i = 0; i < s_probeCount; i++) {
+        int drawIdx = i - s_toolScroll;
+        if (drawIdx < 0 || drawIdx >= visibleRows) continue;
+        int y = listTop + drawIdx * (RESULT_H + RESULT_PAD);
+        const ProbeEntry& e = s_probes[i];
+        bool fresh = (now - e.lastSeen) < 3000;
+
+        t.fillRect(4, y, w - 8, RESULT_H, Theme::TASKBAR);
+
+        // MAC
+        t.setTextColor(fresh ? Theme::GREEN : Theme::VAPOR_PURPLE, Theme::TASKBAR);
+        t.setTextDatum(ML_DATUM);
+        snprintf(buf, sizeof buf, "%02X:%02X:%02X", e.mac[3], e.mac[4], e.mac[5]);
+        t.drawString(buf, 8, y + RESULT_H / 2, 1);
+
+        // SSID they're looking for
+        t.setTextColor(Theme::CYAN, Theme::TASKBAR);
+        char ssidBuf[20];
+        strncpy(ssidBuf, e.ssid, 19);
+        ssidBuf[19] = 0;
+        t.drawString(ssidBuf, 70, y + RESULT_H / 2, 2);
+
+        // RSSI
+        t.setTextColor(Theme::AMBER, Theme::TASKBAR);
+        t.setTextDatum(MR_DATUM);
+        snprintf(buf, sizeof buf, "%ddBm", e.rssi);
+        t.drawString(buf, w - 10, y + RESULT_H / 2, 1);
+    }
+
+    t.fillRect(0, h - 24, w, 24, Theme::TASKBAR);
+    t.setTextColor(Theme::AMBER, Theme::TASKBAR);
+    t.setTextDatum(MC_DATUM);
+    t.drawString("TAP TO STOP", w / 2, h - 12, 2);
+}
+
+// =============================================================================
 //  BLE SCAN
 // =============================================================================
 static const int MAX_BLE_RESULTS = 40;
@@ -622,6 +766,9 @@ static void stopActiveTool() {
         case ActiveTool::RICKROLL:
             WiFi.mode(WIFI_OFF);
             break;
+        case ActiveTool::PROBE_SNIFF:
+            probeSniffStop();
+            break;
         case ActiveTool::BLE_SCAN:
             if (s_pBLEScan && s_pBLEScan->isScanning()) s_pBLEScan->stop();
             break;
@@ -646,6 +793,7 @@ static void launchTool(ActiveTool tool) {
         case ActiveTool::DEAUTH:      /* needs target, handled separately */ break;
         case ActiveTool::BEACON_SPAM: beaconSpamStart();  break;
         case ActiveTool::RICKROLL:    rickrollStart();    break;
+        case ActiveTool::PROBE_SNIFF: probeSniffStart();  break;
         case ActiveTool::BLE_SCAN:    bleScanStart();     break;
         default: break;
     }
@@ -697,6 +845,7 @@ static const char* headerForLevel(ToolboxLevel lvl) {
                 case ActiveTool::DEAUTH:      return "DEAUTH";
                 case ActiveTool::BEACON_SPAM: return "BEACON SPAM";
                 case ActiveTool::RICKROLL:    return "RICKROLL";
+                case ActiveTool::PROBE_SNIFF: return "PROBE SNIFF";
                 case ActiveTool::BLE_SCAN:    return "BLE SCAN";
                 default:                      return "RUNNING...";
             }
@@ -937,6 +1086,7 @@ void uiToolboxTick(TFT_eSPI& t, uint32_t now) {
             case ActiveTool::DEAUTH:      drawDeauth(t, now);     break;
             case ActiveTool::BEACON_SPAM: drawBeaconSpam(t, now); break;
             case ActiveTool::RICKROLL:    drawRickroll(t, now);   break;
+            case ActiveTool::PROBE_SNIFF: drawProbeSniff(t, now); break;
             case ActiveTool::BLE_SCAN:    drawBleScan(t, now);    break;
             default:
                 t.setTextColor(Theme::CYAN, Theme::BG);
@@ -993,6 +1143,7 @@ static bool handleWifiTap(int idx) {
             break;
         case WifiTool::BEACON_SPAM:   launchTool(ActiveTool::BEACON_SPAM); break;
         case WifiTool::RICKROLL:      launchTool(ActiveTool::RICKROLL); break;
+        case WifiTool::PROBE_SNIFF:   launchTool(ActiveTool::PROBE_SNIFF); break;
         default:
             s_toolActive = true;
             s_activeTool = ActiveTool::NONE;
