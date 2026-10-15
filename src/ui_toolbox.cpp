@@ -15,6 +15,7 @@
 // WiChat mesh chat
 #include "mesh.h"
 #include "radio_esp32.h"
+#include <esp_now.h>
 #include <DNSServer.h>
 
 // ---- Which tool is actively running ----
@@ -3185,11 +3186,19 @@ static char wcKbTap(int16_t x, int16_t y, int w, int h) {
 
 static void wichatStart() {
     if (!s_wichatInit) {
+        // CRITICAL: Stop SquatchWatch's WiFi scanner first — only one
+        // WiFi owner at a time. Kill promiscuous mode + scanning.
+        esp_wifi_set_promiscuous(false);
+        WiFi.disconnect(true);
+        WiFi.mode(WIFI_OFF);
+        delay(200);
+
+        // Now init WiChat's dual radio (raw 802.11 + ESP-NOW LR)
         radio_esp32_init(WICHAT_DEFAULT_CH);
         cyd_mesh_init("SQW");
         cyd_mesh_send_beacon();
         s_wichatInit = true;
-        Serial.println("[toolbox] WiChat started");
+        Serial.println("[toolbox] WiChat started — WiFi scanner paused");
     }
     s_wichatInput[0] = 0;
     s_wichatInputLen = 0;
@@ -3198,8 +3207,19 @@ static void wichatStart() {
 }
 
 static void wichatStop() {
-    // Leave mesh running in background — just stop displaying
-    Serial.println("[toolbox] WiChat display closed (mesh stays active)");
+    // Shut down WiChat's radio and restore SquatchWatch's WiFi
+    if (s_wichatInit) {
+        esp_wifi_set_promiscuous(false);
+        esp_now_deinit();
+        WiFi.disconnect(true);
+        WiFi.mode(WIFI_OFF);
+        delay(200);
+        // Restart WiFi for SquatchWatch's scanner
+        WiFi.mode(WIFI_STA);
+        WiFi.disconnect();
+        s_wichatInit = false;
+        Serial.println("[toolbox] WiChat stopped — WiFi scanner resuming");
+    }
 }
 
 static void drawWichat(TFT_eSPI& t, uint32_t now) {
