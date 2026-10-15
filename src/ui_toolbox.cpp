@@ -3237,9 +3237,9 @@ static bool s_wcFnMenuOpen = false;
 
 // WiChat function menu items
 static const char* WC_FN_LABELS[] = {
-    "CHANGE CHANNEL", "NODE LIST", "STATUS", "CANCEL"
+    "CHANGE CHANNEL", "NODE LIST", "SEND PING", "SEND BEACON", "CANCEL"
 };
-static const int WC_FN_COUNT = 4;
+static const int WC_FN_COUNT = 5;
 static QueueHandle_t s_wcRxQueue = nullptr;
 
 typedef struct {
@@ -3354,11 +3354,15 @@ static bool handleWcFnTap(int16_t x, int16_t y, int w, int h) {
                 Serial.printf("  %s rssi=%d\n", g_mesh.nodes[i].callsign, g_mesh.nodes[i].rssi);
             }
             break;
-        case 2:  // STATUS
+        case 2:  // SEND PING
             cyd_mesh_send_ping();
             Serial.println("[wichat] Ping sent");
             break;
-        case 3:  // CANCEL
+        case 3:  // SEND BEACON
+            cyd_mesh_send_beacon();
+            Serial.println("[wichat] Beacon sent");
+            break;
+        case 4:  // CANCEL
             break;
     }
     return true;
