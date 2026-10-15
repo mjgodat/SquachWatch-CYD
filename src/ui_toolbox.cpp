@@ -2531,6 +2531,8 @@ static void drawWifiNetScan(TFT_eSPI& t, uint32_t now) {
 // =============================================================================
 static bool s_usbNetActive = false;
 static uint32_t s_usbNetCmds = 0;
+static bool s_usbAutoScan = false;
+static int s_usbAutoProgress = 0;
 static const int MAX_USB_HOSTS = 20;
 
 struct UsbHostEntry {
@@ -2575,10 +2577,15 @@ static void usbNetScanStart() {
     Serial.println("Or type: SCAN to request a scan");
     Serial.println("=========================================");
 
-    // If connected to WiFi, also offer local scanning
+    // Auto-scan if WiFi is connected
     if (WiFi.isConnected()) {
         Serial.printf("WiFi connected: %s (%s)\n", WiFi.SSID().c_str(), WiFi.localIP().toString().c_str());
-        s_usbStatus = "Connected: " + WiFi.localIP().toString();
+        s_usbStatus = "Scanning " + WiFi.localIP().toString() + "...";
+        s_usbAutoScan = true;
+        s_usbAutoProgress = 0;
+    } else {
+        // Try connecting to any saved network
+        s_usbStatus = "No WiFi — send HOST: lines over serial";
     }
 }
 
@@ -2648,10 +2655,62 @@ static void parseHostLine(const String& line) {
 }
 
 static void usbNetScanTick() {
+    // Process serial input from host
     while (Serial.available()) {
         String line = Serial.readStringUntil('\n');
         line.trim();
         if (line.length() > 0) parseHostLine(line);
+    }
+
+    // Auto-scan: probe one IP per tick when WiFi connected
+    if (s_usbAutoScan && WiFi.isConnected() && s_usbAutoProgress < 254) {
+        IPAddress base = WiFi.localIP();
+        base[3] = s_usbAutoProgress + 1;
+        s_usbAutoProgress++;
+
+        if (s_usbHostCount < MAX_USB_HOSTS) {
+            WiFiClient client;
+            client.setTimeout(30);
+            static const uint16_t ports[] = {80, 443, 22, 21, 8080, 3389, 23, 445};
+            UsbHostEntry& h = s_usbHosts[s_usbHostCount];
+            h.portCount = 0;
+            bool alive = false;
+
+            for (int p = 0; p < 8; p++) {
+                if (client.connect(base, ports[p], 30)) {
+                    alive = true;
+                    if (h.portCount < 8) h.ports[h.portCount++] = ports[p];
+                    client.stop();
+                }
+            }
+
+            if (alive) {
+                strncpy(h.ip, base.toString().c_str(), 15);
+                h.ip[15] = 0;
+                strcpy(h.mac, "");
+                strcpy(h.os, "?");
+                s_usbHostCount++;
+                // Also stream to serial
+                Serial.printf("HOST:%s:??:??:??:??:??:??:", h.ip);
+                for (int p = 0; p < h.portCount; p++) {
+                    if (p > 0) Serial.print(",");
+                    Serial.print(h.ports[p]);
+                }
+                Serial.println(":?");
+            }
+
+            char statusBuf[48];
+            snprintf(statusBuf, sizeof statusBuf, "Scanning %d/254  %d hosts", s_usbAutoProgress, s_usbHostCount);
+            s_usbStatus = String(statusBuf);
+        }
+
+        if (s_usbAutoProgress >= 254) {
+            s_usbAutoScan = false;
+            char doneBuf[32];
+            snprintf(doneBuf, sizeof doneBuf, "Done. %d hosts found", s_usbHostCount);
+            s_usbStatus = String(doneBuf);
+            Serial.println("DONE");
+        }
     }
 }
 
@@ -2672,6 +2731,13 @@ static void drawUsbNetScan(TFT_eSPI& t, uint32_t now) {
     snprintf(buf, sizeof buf, "Hosts: %d  |  Cmds: %lu", s_usbHostCount, (unsigned long)s_usbNetCmds);
     t.setTextColor(Theme::CYAN, Theme::BG);
     t.drawString(buf, w / 2, HEADER_H + 60, 1);
+
+    // Progress bar for auto-scan
+    if (s_usbAutoScan) {
+        int barW = (w - 20) * s_usbAutoProgress / 254;
+        t.fillRect(10, HEADER_H + 70, w - 20, 6, Theme::TASKBAR);
+        t.fillRect(10, HEADER_H + 70, barW, 6, Theme::GREEN);
+    }
 
     // Host list
     int listTop = HEADER_H + 75;
