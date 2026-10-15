@@ -27,8 +27,6 @@ enum class WifiTool : uint8_t {
     AP_CLONE,
     KARMA,
     RICKROLL,
-    WIFI_NET_SCAN,
-    USB_NET_SCAN,
     BACK,
     COUNT
 };
@@ -58,6 +56,8 @@ enum class UtilTool : uint8_t {
     WIFI_LOGGER,
     PCAP_VIEWER,
     USB_WIRESHARK,
+    WIFI_NET_SCAN,
+    USB_NET_SCAN,
     BACK,
     COUNT
 };

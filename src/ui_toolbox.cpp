@@ -3366,8 +3366,7 @@ static const char* CAT_LABELS_PLAIN[] = {
 static const char* WIFI_LABELS[] = {
     "SCAN NETWORKS", "DEAUTH", "BEACON SPAM", "EVIL PORTAL",
     "PROBE SNIFF", "PMKID CAPTURE", "HANDSHAKE CAPTURE", "PCAP TO SD",
-    "DHCP STARVE", "AP CLONE", "KARMA", "RICKROLL",
-    "LAN SCANNER (WIFI)", "LAN SCANNER (USB)", "< BACK"
+    "DHCP STARVE", "AP CLONE", "KARMA", "RICKROLL", "< BACK"
 };
 static const char* BLE_LABELS[] = {
     "SCAN DEVICES", "APPLE SPAM", "SAMSUNG SPAM", "SWIFTPAIR SPAM",
@@ -3377,7 +3376,8 @@ static const char* USB_LABELS[] = {
     "DUCKY SCRIPT (SD)", "USB KEYBOARD", "< BACK"
 };
 static const char* UTIL_LABELS[] = {
-    "SD BROWSER", "WIFI LOGGER", "PCAP VIEWER", "USB WIRESHARK", "< BACK"
+    "SD BROWSER", "WIFI LOGGER", "PCAP VIEWER", "USB WIRESHARK",
+    "LAN SCANNER (WIFI)", "LAN SCANNER (USB)", "< BACK"
 };
 
 static const char** labelsForLevel(ToolboxLevel lvl, int& count) {
@@ -3772,8 +3772,6 @@ static bool handleWifiTap(int idx) {
         case WifiTool::KARMA:          launchTool(ActiveTool::KARMA); break;
         case WifiTool::DHCP_STARVE:    launchTool(ActiveTool::DHCP_STARVE); break;
         case WifiTool::PCAP_CAPTURE:   launchTool(ActiveTool::PCAP_CAPTURE); break;
-        case WifiTool::WIFI_NET_SCAN:  launchTool(ActiveTool::WIFI_NET_SCAN); break;
-        case WifiTool::USB_NET_SCAN:   launchTool(ActiveTool::USB_NET_SCAN); break;
         case WifiTool::AP_CLONE:       // Clone from menu needs scan first
             if (s_scanCount > 0) { cloneApStart(0); launchTool(ActiveTool::CLONE_AP); }
             else launchTool(ActiveTool::WIFI_SCAN);
@@ -3827,6 +3825,8 @@ static bool handleUtilTap(int idx) {
         case UtilTool::WIFI_LOGGER:   launchTool(ActiveTool::WIFI_LOGGER); break;
         case UtilTool::PCAP_VIEWER:    launchTool(ActiveTool::PCAP_VIEWER); break;
         case UtilTool::USB_WIRESHARK:  launchTool(ActiveTool::USB_WIRESHARK); break;
+        case UtilTool::WIFI_NET_SCAN:  launchTool(ActiveTool::WIFI_NET_SCAN); break;
+        case UtilTool::USB_NET_SCAN:   launchTool(ActiveTool::USB_NET_SCAN); break;
         default:
             s_toolActive = true;
             s_activeTool = ActiveTool::NONE;
