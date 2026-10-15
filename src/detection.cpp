@@ -1,5 +1,6 @@
 // SquachWatch-CYD — DetectionEngine implementation
 #include "detection.h"
+#include "wichat_hook.h"
 #include "wardrive.h"
 #include "wifi_auth.h"
 #include "serial_flush.h"
@@ -799,8 +800,10 @@ bool DetectionEngine::init() {
     esp_wifi_set_promiscuous_filter(&filter);
     esp_wifi_set_promiscuous_rx_cb([](void* buf, wifi_promiscuous_pkt_type_t) {
         s_wifiRaw++;
-        if (!g_engine) return;
         const wifi_promiscuous_pkt_t* pkt = (const wifi_promiscuous_pkt_t*)buf;
+        // WiChat hook — check every frame for WiChat BSSID
+        { auto h = wichat_get_rx_hook(); if (h) h(pkt, pkt->rx_ctrl.sig_len); }
+        if (!g_engine) return;
         {
             const uint8_t ch = pkt->rx_ctrl.channel;
             if (ch >= 1 && ch <= 13 && s_chanFrames[ch] < 0xFFFF) s_chanFrames[ch]++;

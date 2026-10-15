@@ -14,7 +14,7 @@
 
 // WiChat mesh chat
 #include "mesh.h"
-#include "radio_esp32.h"
+#include "wichat_hook.h"
 #include <esp_now.h>
 #include <DNSServer.h>
 
@@ -3184,21 +3184,41 @@ static char wcKbTap(int16_t x, int16_t y, int w, int h) {
     return 0;
 }
 
+// WiChat BSSID for filtering
+static const uint8_t WICHAT_BSSID_FILTER[6] = WICHAT_BSSID;
+static QueueHandle_t s_wcRxQueue = nullptr;
+
+typedef struct {
+    uint8_t data[512];
+    uint16_t len;
+    int8_t rssi;
+} wc_rx_t;
+
+// Hook callback — runs in ISR context from SquatchWatch's promiscuous CB
+static void wichatRxHook(const wifi_promiscuous_pkt_t* pkt, uint16_t len) {
+    if (len < 24 || len > 500) return;
+    const uint8_t* frame = pkt->payload;
+    // Check for WiChat BSSID at offset 16
+    if (memcmp(frame + 16, WICHAT_BSSID_FILTER, 6) != 0) return;
+    if (!s_wcRxQueue) return;
+    wc_rx_t entry;
+    entry.len = len;
+    entry.rssi = pkt->rx_ctrl.rssi;
+    memcpy(entry.data, frame, len);
+    xQueueSendFromISR(s_wcRxQueue, &entry, NULL);
+}
+
 static void wichatStart() {
     if (!s_wichatInit) {
-        // CRITICAL: Stop SquatchWatch's WiFi scanner first — only one
-        // WiFi owner at a time. Kill promiscuous mode + scanning.
-        esp_wifi_set_promiscuous(false);
-        WiFi.disconnect(true);
-        WiFi.mode(WIFI_OFF);
-        delay(200);
-
-        // Now init WiChat's dual radio (raw 802.11 + ESP-NOW LR)
-        radio_esp32_init(WICHAT_DEFAULT_CH);
+        // Create RX queue and register hook — NO radio takeover
+        if (!s_wcRxQueue) s_wcRxQueue = xQueueCreate(16, sizeof(wc_rx_t));
+        wichat_set_rx_hook(wichatRxHook);
         cyd_mesh_init("SQW");
+        // Get our MAC
+        esp_wifi_get_mac(WIFI_IF_STA, g_mesh.local_mac);
         cyd_mesh_send_beacon();
         s_wichatInit = true;
-        Serial.println("[toolbox] WiChat started — WiFi scanner paused");
+        Serial.println("[toolbox] WiChat started — sharing radio with scanner");
     }
     s_wichatInput[0] = 0;
     s_wichatInputLen = 0;
@@ -3207,29 +3227,23 @@ static void wichatStart() {
 }
 
 static void wichatStop() {
-    // Shut down WiChat's radio and restore SquatchWatch's WiFi
-    if (s_wichatInit) {
-        esp_wifi_set_promiscuous(false);
-        esp_now_deinit();
-        WiFi.disconnect(true);
-        WiFi.mode(WIFI_OFF);
-        delay(200);
-        // Restart WiFi for SquatchWatch's scanner
-        WiFi.mode(WIFI_STA);
-        WiFi.disconnect();
-        s_wichatInit = false;
-        Serial.println("[toolbox] WiChat stopped — WiFi scanner resuming");
-    }
+    // Just unhook — don't touch the radio
+    wichat_set_rx_hook(nullptr);
+    s_wichatInit = false;
+    Serial.println("[toolbox] WiChat stopped — hook removed");
 }
 
 static void drawWichat(TFT_eSPI& t, uint32_t now) {
     const int w = t.width();
     const int h = t.height();
 
-    // Process mesh
-    uint8_t rx_buf[512]; int8_t rssi;
-    int rx_len = radio_esp32_rx(rx_buf, sizeof(rx_buf), &rssi);
-    if (rx_len > 0) cyd_mesh_process_rx(rx_buf, (size_t)rx_len, rssi);
+    // Process mesh — drain RX queue from the hook
+    if (s_wcRxQueue) {
+        wc_rx_t entry;
+        while (xQueueReceive(s_wcRxQueue, &entry, 0) == pdTRUE) {
+            cyd_mesh_process_rx(entry.data, entry.len, entry.rssi);
+        }
+    }
     cyd_mesh_tick(now);
 
     // Header
