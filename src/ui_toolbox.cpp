@@ -506,6 +506,60 @@ static void drawRickroll(TFT_eSPI& t, uint32_t now) {
 }
 
 // =============================================================================
+//  CLONE AP — create a fake AP with the same SSID as a scanned network
+// =============================================================================
+static char s_cloneSsid[33] = {0};
+static uint32_t s_cloneClients = 0;
+static uint32_t s_cloneStartMs = 0;
+
+static void cloneApStart(int scanIdx) {
+    if (scanIdx < 0 || scanIdx >= s_scanCount) return;
+    strncpy(s_cloneSsid, s_scanResults[scanIdx].ssid, 32);
+    s_cloneSsid[32] = 0;
+    WiFi.mode(WIFI_AP);
+    WiFi.softAP(s_cloneSsid, NULL, s_scanResults[scanIdx].channel, 0, 4);
+    s_cloneClients = 0;
+    s_cloneStartMs = millis();
+    Serial.printf("[toolbox] Clone AP started: %s on ch%d\n", s_cloneSsid, s_scanResults[scanIdx].channel);
+}
+
+static void drawCloneAp(TFT_eSPI& t, uint32_t now) {
+    const int w = t.width();
+    const int h = t.height();
+
+    s_cloneClients = WiFi.softAPgetStationNum();
+
+    t.setTextColor(Theme::RED, Theme::BG);
+    t.setTextDatum(MC_DATUM);
+    t.drawString("EVIL TWIN ACTIVE", w / 2, HEADER_H + 20, 4);
+
+    t.setTextColor(Theme::CYAN, Theme::BG);
+    t.drawString(s_cloneSsid, w / 2, HEADER_H + 55, 2);
+
+    // Connected clients — big number
+    char buf[32];
+    snprintf(buf, sizeof buf, "%lu", (unsigned long)s_cloneClients);
+    t.setTextColor(Theme::VAPOR_PINK, Theme::BG);
+    t.drawString(buf, w / 2, h / 2, 7);
+    t.setTextColor(Theme::AMBER, Theme::BG);
+    t.drawString("clients connected", w / 2, h / 2 + 40, 2);
+
+    // IP
+    t.setTextColor(Theme::GREEN, Theme::BG);
+    t.drawString(WiFi.softAPIP().toString().c_str(), w / 2, h / 2 + 65, 2);
+
+    // Elapsed
+    uint32_t elapsed = (now - s_cloneStartMs) / 1000;
+    snprintf(buf, sizeof buf, "%02lu:%02lu", elapsed / 60, elapsed % 60);
+    t.setTextColor(Theme::VAPOR_PURPLE, Theme::BG);
+    t.drawString(buf, w / 2, h / 2 + 90, 2);
+
+    t.fillRect(0, h - 24, w, 24, Theme::TASKBAR);
+    t.setTextColor(Theme::AMBER, Theme::TASKBAR);
+    t.drawString("TAP TO STOP", w / 2, h - 12, 2);
+}
+
+// =============================================================================
 //  PROBE SNIFF — show probe requests from nearby devices
 // =============================================================================
 static const int MAX_PROBES = 50;
@@ -766,6 +820,10 @@ static void stopActiveTool() {
         case ActiveTool::RICKROLL:
             WiFi.mode(WIFI_OFF);
             break;
+        case ActiveTool::CLONE_AP:
+            WiFi.softAPdisconnect(true);
+            WiFi.mode(WIFI_OFF);
+            break;
         case ActiveTool::PROBE_SNIFF:
             probeSniffStop();
             break;
@@ -845,6 +903,7 @@ static const char* headerForLevel(ToolboxLevel lvl) {
                 case ActiveTool::DEAUTH:      return "DEAUTH";
                 case ActiveTool::BEACON_SPAM: return "BEACON SPAM";
                 case ActiveTool::RICKROLL:    return "RICKROLL";
+                case ActiveTool::CLONE_AP:    return "CLONE AP";
                 case ActiveTool::PROBE_SNIFF: return "PROBE SNIFF";
                 case ActiveTool::BLE_SCAN:    return "BLE SCAN";
                 default:                      return "RUNNING...";
@@ -1025,6 +1084,10 @@ static bool handleContextTap(TFT_eSPI& t, int16_t x, int16_t y) {
                 deauthStart(target);
                 launchTool(ActiveTool::DEAUTH);
                 break;
+            case 1:  // CLONE THIS AP
+                cloneApStart(target);
+                launchTool(ActiveTool::CLONE_AP);
+                break;
             default:
                 Serial.printf("[toolbox] %s on %s — not yet implemented\n",
                               WIFI_CTX_LABELS[row], s_scanResults[target].ssid);
@@ -1086,6 +1149,7 @@ void uiToolboxTick(TFT_eSPI& t, uint32_t now) {
             case ActiveTool::DEAUTH:      drawDeauth(t, now);     break;
             case ActiveTool::BEACON_SPAM: drawBeaconSpam(t, now); break;
             case ActiveTool::RICKROLL:    drawRickroll(t, now);   break;
+            case ActiveTool::CLONE_AP:    drawCloneAp(t, now);    break;
             case ActiveTool::PROBE_SNIFF: drawProbeSniff(t, now); break;
             case ActiveTool::BLE_SCAN:    drawBleScan(t, now);    break;
             default:
