@@ -13,7 +13,7 @@
 // ---- Which tool is actively running ----
 enum class ActiveTool : uint8_t {
     NONE = 0, WIFI_SCAN, DEAUTH, BEACON_SPAM, RICKROLL, CLONE_AP, EVIL_PORTAL,
-    PROBE_SNIFF, BLE_SCAN, BLE_TRACK, APPLE_SPAM, SAMSUNG_SPAM, SWIFTPAIR_SPAM
+    PROBE_SNIFF, KARMA, BLE_SCAN, BLE_TRACK, APPLE_SPAM, SAMSUNG_SPAM, SWIFTPAIR_SPAM
 };
 
 // ---- Which context menu type is open ----

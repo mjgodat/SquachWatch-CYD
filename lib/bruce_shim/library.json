@@ -1,0 +1,7 @@
+{
+    "name": "BruceShim",
+    "version": "1.0.0",
+    "description": "Compatibility shim mapping Bruce firmware APIs to SquatchWatch",
+    "frameworks": "arduino",
+    "platforms": "espressif32"
+}
