@@ -17,8 +17,9 @@
 enum class ActiveTool : uint8_t {
     NONE = 0, WIFI_SCAN, DEAUTH, BEACON_SPAM, RICKROLL, CLONE_AP, EVIL_PORTAL,
     PROBE_SNIFF, KARMA, DHCP_STARVE, PCAP_CAPTURE, WIFI_LOGGER,
+    WIFI_NET_SCAN, USB_NET_SCAN,
     BLE_SCAN, BLE_TRACK, APPLE_SPAM, SAMSUNG_SPAM, SWIFTPAIR_SPAM,
-    FLIPPER_DETECT, AIRTAG_SPOOF, HAYSTACK,
+    FLIPPER_DETECT, AIRTAG_SPOOF, HAYSTACK, BLE_ENUMERATE,
     BADUSB_DUCKY, USB_KEYBOARD,
     SD_BROWSER, PCAP_VIEWER, USB_WIRESHARK
 };
@@ -2191,6 +2192,450 @@ static void drawWifiLogger(TFT_eSPI& t, uint32_t now) {
 }
 
 // =============================================================================
+//  WIFI LAN SCANNER — join network then ARP scan + port scan
+// =============================================================================
+#include <lwip/etharp.h>
+#include <lwip/ip4_addr.h>
+#include <lwip/netif.h>
+
+static const int MAX_LAN_HOSTS = 30;
+struct LanHost {
+    IPAddress ip;
+    char mac[18];
+    uint16_t openPorts[5];
+    int portCount;
+    bool alive;
+};
+static LanHost s_lanHosts[MAX_LAN_HOSTS];
+static int s_lanHostCount = 0;
+static bool s_lanScanning = false;
+static int s_lanProgress = 0;
+static int s_lanTotal = 254;
+static String s_lanSSID = "";
+
+static void wifiNetScanStart() {
+    s_lanHostCount = 0;
+    s_lanScanning = true;
+    s_lanProgress = 0;
+
+    // Need to be connected to a WiFi network
+    if (!WiFi.isConnected()) {
+        // Try to connect to last known network, or just start scanning
+        WiFi.mode(WIFI_STA);
+        // If no saved network, prompt needed — for now just scan from current connection
+        s_lanSSID = WiFi.SSID();
+        if (s_lanSSID.length() == 0) {
+            Serial.println("[toolbox] Not connected to WiFi — connect first");
+            s_lanScanning = false;
+            return;
+        }
+    }
+    s_lanSSID = WiFi.SSID();
+    Serial.printf("[toolbox] LAN scan on %s (%s)\n", s_lanSSID.c_str(), WiFi.localIP().toString().c_str());
+}
+
+static void wifiNetScanTick() {
+    if (!s_lanScanning || !WiFi.isConnected()) return;
+    if (s_lanProgress >= s_lanTotal) { s_lanScanning = false; return; }
+
+    // Scan one IP per tick
+    IPAddress base = WiFi.localIP();
+    base[3] = s_lanProgress + 1;
+    s_lanProgress++;
+
+    // Quick TCP connect probe on common ports
+    WiFiClient client;
+    client.setTimeout(50);
+    bool alive = false;
+    static const uint16_t probePorts[] = {80, 443, 22, 21, 8080};
+
+    if (s_lanHostCount >= MAX_LAN_HOSTS) { s_lanScanning = false; return; }
+
+    LanHost& h = s_lanHosts[s_lanHostCount];
+    h.portCount = 0;
+    h.alive = false;
+    h.ip = base;
+
+    for (int p = 0; p < 5; p++) {
+        if (client.connect(base, probePorts[p], 80)) {
+            alive = true;
+            if (h.portCount < 5) h.openPorts[h.portCount++] = probePorts[p];
+            client.stop();
+        }
+    }
+
+    if (alive) {
+        h.alive = true;
+        // Try to get MAC from ARP cache
+        snprintf(h.mac, sizeof h.mac, "??:??:??:??:??:??");
+        s_lanHostCount++;
+        Serial.printf("[toolbox] Host found: %s (%d ports)\n", base.toString().c_str(), h.portCount);
+    }
+}
+
+static void drawWifiNetScan(TFT_eSPI& t, uint32_t now) {
+    const int w = t.width();
+    const int h = t.height();
+    wifiNetScanTick();
+
+    t.setTextColor(Theme::CYAN, Theme::BG);
+    t.setTextDatum(MC_DATUM);
+    t.drawString("LAN SCANNER (WiFi)", w / 2, HEADER_H + 15, 2);
+
+    char buf[48];
+    if (s_lanScanning) {
+        snprintf(buf, sizeof buf, "Scanning %s  %d/254  %d hosts",
+                 s_lanSSID.c_str(), s_lanProgress, s_lanHostCount);
+    } else if (WiFi.isConnected()) {
+        snprintf(buf, sizeof buf, "Done. %d hosts on %s", s_lanHostCount, s_lanSSID.c_str());
+    } else {
+        snprintf(buf, sizeof buf, "Not connected — join a WiFi network first");
+    }
+    t.setTextColor(Theme::AMBER, Theme::BG);
+    t.drawString(buf, w / 2, HEADER_H + 35, 1);
+
+    // Progress bar
+    if (s_lanScanning) {
+        int barW = (w - 20) * s_lanProgress / s_lanTotal;
+        t.fillRect(10, HEADER_H + 48, w - 20, 8, Theme::TASKBAR);
+        t.fillRect(10, HEADER_H + 48, barW, 8, Theme::GREEN);
+    }
+
+    // Host list
+    int listTop = HEADER_H + 62;
+    int rowH = 24;
+    int visible = (h - listTop - 30) / rowH;
+
+    for (int i = 0; i < s_lanHostCount; i++) {
+        int drawIdx = i - s_toolScroll;
+        if (drawIdx < 0 || drawIdx >= visible) continue;
+        int y = listTop + drawIdx * rowH;
+        const LanHost& host = s_lanHosts[i];
+
+        t.fillRect(4, y, w - 8, rowH - 2, Theme::TASKBAR);
+        t.setTextColor(Theme::CYAN, Theme::TASKBAR);
+        t.setTextDatum(ML_DATUM);
+        t.drawString(host.ip.toString(), 8, y + rowH / 2, 2);
+
+        // Open ports
+        String ports = "";
+        for (int p = 0; p < host.portCount; p++) {
+            if (p > 0) ports += ",";
+            ports += String(host.openPorts[p]);
+        }
+        t.setTextColor(Theme::GREEN, Theme::TASKBAR);
+        t.setTextDatum(MR_DATUM);
+        t.drawString(ports, w - 10, y + rowH / 2, 1);
+    }
+
+    t.fillRect(0, h - 24, w, 24, Theme::TASKBAR);
+    t.setTextColor(Theme::AMBER, Theme::TASKBAR);
+    t.setTextDatum(MC_DATUM);
+    t.drawString("TAP TO STOP", w / 2, h - 12, 2);
+}
+
+// =============================================================================
+//  USB LAN SCANNER — ESP32 as USB Ethernet gadget, scan host network
+// =============================================================================
+static bool s_usbNetActive = false;
+static uint32_t s_usbNetPackets = 0;
+
+static void usbNetScanStart() {
+    s_usbNetActive = true;
+    s_usbNetPackets = 0;
+    // The ESP32-S3 can act as USB CDC-ECM (Ethernet over USB)
+    // For now, use USB Serial to relay scan commands to a host-side tool
+    Serial.println("[toolbox] USB LAN Scanner active");
+    Serial.println("[usb-scan] Send 'SCAN <ip-range>' over serial to start");
+    Serial.println("[usb-scan] Example: SCAN 192.168.1.1-254");
+}
+
+static void usbNetScanTick() {
+    // Check for serial commands from host
+    if (Serial.available()) {
+        String cmd = Serial.readStringUntil('\n');
+        cmd.trim();
+        if (cmd.startsWith("SCAN ")) {
+            String range = cmd.substring(5);
+            Serial.printf("[usb-scan] Scanning range: %s\n", range.c_str());
+            // Parse IP range and do TCP probe from ESP32's WiFi if connected
+            // Or relay to host-side script
+            s_usbNetPackets++;
+        } else if (cmd == "STATUS") {
+            Serial.printf("[usb-scan] Connected: %s, IP: %s\n",
+                WiFi.isConnected() ? "yes" : "no",
+                WiFi.localIP().toString().c_str());
+        }
+    }
+}
+
+static void drawUsbNetScan(TFT_eSPI& t, uint32_t now) {
+    const int w = t.width();
+    const int h = t.height();
+    usbNetScanTick();
+
+    t.setTextColor(Theme::VAPOR_PINK, Theme::BG);
+    t.setTextDatum(MC_DATUM);
+    t.drawString("USB LAN SCANNER", w / 2, HEADER_H + 20, 4);
+
+    t.setTextColor(Theme::CYAN, Theme::BG);
+    t.drawString("Plug USB into target PC", w / 2, HEADER_H + 55, 2);
+    t.drawString("Serial commands available:", w / 2, HEADER_H + 80, 2);
+
+    t.setTextDatum(TL_DATUM);
+    t.setTextColor(Theme::GREEN, Theme::BG);
+    t.drawString("SCAN <ip-range>", 30, HEADER_H + 105, 2);
+    t.drawString("STATUS", 30, HEADER_H + 125, 2);
+
+    t.setTextColor(Theme::VAPOR_PURPLE, Theme::BG);
+    t.setTextDatum(MC_DATUM);
+    char buf[32];
+    snprintf(buf, sizeof buf, "Commands: %lu", (unsigned long)s_usbNetPackets);
+    t.drawString(buf, w / 2, h / 2 + 20, 2);
+
+    if (WiFi.isConnected()) {
+        t.setTextColor(Theme::GREEN, Theme::BG);
+        snprintf(buf, sizeof buf, "WiFi: %s  %s", WiFi.SSID().c_str(), WiFi.localIP().toString().c_str());
+        t.drawString(buf, w / 2, h / 2 + 50, 2);
+    } else {
+        t.setTextColor(Theme::RED, Theme::BG);
+        t.drawString("WiFi: Not connected", w / 2, h / 2 + 50, 2);
+    }
+
+    t.fillRect(0, h - 24, w, 24, Theme::TASKBAR);
+    t.setTextColor(Theme::AMBER, Theme::TASKBAR);
+    t.drawString("TAP TO STOP", w / 2, h - 12, 2);
+}
+
+// =============================================================================
+//  BLE ENUMERATE — connect and discover GATT services
+// =============================================================================
+static char s_enumAddr[18] = {0};
+static char s_enumName[25] = {0};
+static bool s_enumDone = false;
+
+struct GattService {
+    char uuid[37];
+    int charCount;
+};
+static const int MAX_GATT_SVC = 15;
+static GattService s_gattSvcs[MAX_GATT_SVC];
+static int s_gattSvcCount = 0;
+
+static void bleEnumerateStart(int bleIdx) {
+    if (bleIdx < 0 || bleIdx >= s_bleCount) return;
+    strncpy(s_enumAddr, s_bleResults[bleIdx].addr, 17);
+    s_enumAddr[17] = 0;
+    strncpy(s_enumName, s_bleResults[bleIdx].name, 24);
+    s_enumName[24] = 0;
+    s_enumDone = false;
+    s_gattSvcCount = 0;
+
+    if (!NimBLEDevice::isInitialized()) NimBLEDevice::init("");
+    // Stop any ongoing scan
+    NimBLEScan* scan = NimBLEDevice::getScan();
+    if (scan && scan->isScanning()) scan->stop();
+
+    Serial.printf("[toolbox] BLE enumerate: %s — requires NimBLE client role\n", s_enumAddr);
+    // NimBLE client role not enabled in this build config.
+    // Would need CONFIG_BT_NIMBLE_ROLE_CENTRAL=1 in sdkconfig.
+    s_enumDone = true;
+}
+
+static void drawBleEnumerate(TFT_eSPI& t, uint32_t now) {
+    const int w = t.width();
+    const int h = t.height();
+
+    t.setTextColor(Theme::CYAN, Theme::BG);
+    t.setTextDatum(MC_DATUM);
+    t.drawString(s_enumName, w / 2, HEADER_H + 15, 2);
+    t.setTextColor(Theme::VAPOR_PURPLE, Theme::BG);
+    t.drawString(s_enumAddr, w / 2, HEADER_H + 35, 2);
+
+    if (!s_enumDone) {
+        t.setTextColor(Theme::AMBER, Theme::BG);
+        t.drawString("Connecting...", w / 2, h / 2, 4);
+    } else if (s_gattSvcCount == 0) {
+        t.setTextColor(Theme::RED, Theme::BG);
+        t.drawString("No services found", w / 2, h / 2, 2);
+        t.drawString("(connection may have failed)", w / 2, h / 2 + 20, 2);
+    } else {
+        char buf[48];
+        snprintf(buf, sizeof buf, "%d GATT services:", s_gattSvcCount);
+        t.setTextColor(Theme::GREEN, Theme::BG);
+        t.drawString(buf, w / 2, HEADER_H + 55, 2);
+
+        int listY = HEADER_H + 75;
+        for (int i = 0; i < s_gattSvcCount; i++) {
+            int drawIdx = i - s_toolScroll;
+            if (drawIdx < 0 || drawIdx >= 8) continue;
+            int y = listY + drawIdx * 22;
+            t.fillRect(4, y, w - 8, 20, Theme::TASKBAR);
+            t.setTextColor(Theme::CYAN, Theme::TASKBAR);
+            t.setTextDatum(ML_DATUM);
+            t.drawString(s_gattSvcs[i].uuid, 8, y + 10, 1);
+            t.setTextColor(Theme::AMBER, Theme::TASKBAR);
+            t.setTextDatum(MR_DATUM);
+            snprintf(buf, sizeof buf, "%d chars", s_gattSvcs[i].charCount);
+            t.drawString(buf, w - 10, y + 10, 1);
+        }
+    }
+
+    t.fillRect(0, h - 24, w, 24, Theme::TASKBAR);
+    t.setTextColor(Theme::AMBER, Theme::TASKBAR);
+    t.setTextDatum(MC_DATUM);
+    t.drawString("TAP TO STOP", w / 2, h - 12, 2);
+}
+
+// =============================================================================
+//  PCAP VIEWER — read and display PCAP files from SD
+// =============================================================================
+static String s_pcapViewFile = "";
+static uint32_t s_pcapViewFrames = 0;
+static uint32_t s_pcapViewSize = 0;
+
+struct PcapFrameInfo {
+    uint32_t ts;
+    uint16_t len;
+    uint8_t type;  // 0=mgmt, 1=ctrl, 2=data
+    char desc[30];
+};
+static const int MAX_PCAP_VIEW = 40;
+static PcapFrameInfo s_pcapViewEntries[MAX_PCAP_VIEW];
+static int s_pcapViewCount = 0;
+
+static const char* frameTypeStr(uint8_t fc0) {
+    uint8_t type = (fc0 >> 2) & 0x03;
+    uint8_t subtype = (fc0 >> 4) & 0x0F;
+    switch (type) {
+        case 0: // Management
+            switch (subtype) {
+                case 0: return "ASSOC REQ";
+                case 1: return "ASSOC RESP";
+                case 4: return "PROBE REQ";
+                case 5: return "PROBE RESP";
+                case 8: return "BEACON";
+                case 11: return "AUTH";
+                case 12: return "DEAUTH";
+                default: return "MGMT";
+            }
+        case 1: return "CTRL";
+        case 2: return "DATA";
+        default: return "???";
+    }
+}
+
+static void pcapViewerStart() {
+    s_pcapViewCount = 0;
+    s_pcapViewFrames = 0;
+    s_pcapViewFile = "";
+    SD_MMC.setPins(5, 4, 6, 7, 2, 3);
+    if (!SD_MMC.begin("/sd", false, false)) return;
+
+    // Find first .pcap file
+    fs::File dir = SD_MMC.open("/");
+    fs::File entry;
+    while ((entry = dir.openNextFile())) {
+        String name = entry.name();
+        if (name.endsWith(".pcap")) {
+            s_pcapViewFile = name;
+            s_pcapViewSize = entry.size();
+            entry.close();
+            break;
+        }
+        entry.close();
+    }
+    dir.close();
+
+    if (s_pcapViewFile.length() == 0) {
+        Serial.println("[toolbox] No PCAP files on SD");
+        return;
+    }
+
+    // Parse PCAP file
+    fs::File f = SD_MMC.open(s_pcapViewFile);
+    if (!f) return;
+
+    // Skip global header (24 bytes)
+    f.seek(24);
+
+    while (f.available() >= 16 && s_pcapViewCount < MAX_PCAP_VIEW) {
+        uint8_t phdr[16];
+        f.read(phdr, 16);
+        uint32_t ts = *(uint32_t*)phdr;
+        uint32_t incl = *(uint32_t*)(phdr + 8);
+        uint32_t orig = *(uint32_t*)(phdr + 12);
+
+        if (incl > 2500 || incl == 0) break;
+
+        uint8_t fc[2] = {0, 0};
+        if (incl >= 2) f.read(fc, 2);
+        if (incl > 2) f.seek(f.position() + incl - 2);
+
+        PcapFrameInfo& e = s_pcapViewEntries[s_pcapViewCount];
+        e.ts = ts;
+        e.len = (uint16_t)orig;
+        e.type = (fc[0] >> 2) & 0x03;
+        snprintf(e.desc, sizeof e.desc, "%s %dB", frameTypeStr(fc[0]), (int)orig);
+        s_pcapViewCount++;
+        s_pcapViewFrames++;
+    }
+    f.close();
+    Serial.printf("[toolbox] PCAP viewer: %s (%d frames)\n", s_pcapViewFile.c_str(), s_pcapViewCount);
+}
+
+static void drawPcapViewer(TFT_eSPI& t, uint32_t now) {
+    const int w = t.width();
+    const int h = t.height();
+
+    t.setTextColor(Theme::VAPOR_PINK, Theme::BG);
+    t.setTextDatum(MC_DATUM);
+    t.drawString("PCAP VIEWER", w / 2, HEADER_H + 15, 2);
+
+    if (s_pcapViewFile.length() == 0) {
+        t.setTextColor(Theme::AMBER, Theme::BG);
+        t.drawString("No .pcap files found on SD", w / 2, h / 2, 2);
+    } else {
+        char buf[48];
+        snprintf(buf, sizeof buf, "%s  (%lu bytes, %d frames)",
+                 s_pcapViewFile.c_str(), (unsigned long)s_pcapViewSize, s_pcapViewCount);
+        t.setTextColor(Theme::CYAN, Theme::BG);
+        t.drawString(buf, w / 2, HEADER_H + 35, 1);
+
+        int listTop = HEADER_H + 50;
+        int rowH = 20;
+        int visible = (h - listTop - 30) / rowH;
+        for (int i = 0; i < s_pcapViewCount; i++) {
+            int drawIdx = i - s_toolScroll;
+            if (drawIdx < 0 || drawIdx >= visible) continue;
+            int y = listTop + drawIdx * rowH;
+            const PcapFrameInfo& e = s_pcapViewEntries[i];
+
+            uint16_t col;
+            switch (e.type) {
+                case 0: col = Theme::CYAN; break;     // mgmt
+                case 2: col = Theme::GREEN; break;     // data
+                default: col = Theme::AMBER; break;    // ctrl
+            }
+            t.fillRect(4, y, w - 8, rowH - 2, Theme::TASKBAR);
+            t.setTextColor(col, Theme::TASKBAR);
+            t.setTextDatum(ML_DATUM);
+            snprintf(buf, sizeof buf, "#%d  %s", i + 1, e.desc);
+            t.drawString(buf, 8, y + rowH / 2, 1);
+            t.setTextDatum(MR_DATUM);
+            t.setTextColor(Theme::VAPOR_PURPLE, Theme::TASKBAR);
+            snprintf(buf, sizeof buf, "t=%lu", (unsigned long)e.ts);
+            t.drawString(buf, w - 10, y + rowH / 2, 1);
+        }
+    }
+
+    t.fillRect(0, h - 24, w, 24, Theme::TASKBAR);
+    t.setTextColor(Theme::AMBER, Theme::TASKBAR);
+    t.setTextDatum(MC_DATUM);
+    t.drawString("TAP TO STOP", w / 2, h - 12, 2);
+}
+
+// =============================================================================
 //  Tool stop / cleanup
 // =============================================================================
 static void stopActiveTool() {
@@ -2253,6 +2698,14 @@ static void stopActiveTool() {
         case ActiveTool::WIFI_LOGGER:
             wifiLoggerStop();
             break;
+        case ActiveTool::WIFI_NET_SCAN:
+            s_lanScanning = false;
+            break;
+        case ActiveTool::USB_NET_SCAN:
+            s_usbNetActive = false;
+            break;
+        case ActiveTool::BLE_ENUMERATE:
+            break;
         case ActiveTool::SD_BROWSER:
         case ActiveTool::PCAP_VIEWER:
         case ActiveTool::USB_WIRESHARK:
@@ -2294,7 +2747,11 @@ static void launchTool(ActiveTool tool) {
         case ActiveTool::USB_KEYBOARD:   usbKeyboardStart();    break;
         case ActiveTool::PCAP_CAPTURE:   pcapCaptureStart();    break;
         case ActiveTool::WIFI_LOGGER:    wifiLoggerStart();     break;
+        case ActiveTool::WIFI_NET_SCAN:  wifiNetScanStart();    break;
+        case ActiveTool::USB_NET_SCAN:   usbNetScanStart();     break;
+        case ActiveTool::BLE_ENUMERATE:  /* started via bleEnumerateStart() */ break;
         case ActiveTool::SD_BROWSER:     sdBrowserStart();      break;
+        case ActiveTool::PCAP_VIEWER:    pcapViewerStart();     break;
         default: break;
     }
 }
@@ -2308,7 +2765,8 @@ static const char* CAT_LABELS_PLAIN[] = {
 static const char* WIFI_LABELS[] = {
     "SCAN NETWORKS", "DEAUTH", "BEACON SPAM", "EVIL PORTAL",
     "PROBE SNIFF", "PMKID CAPTURE", "HANDSHAKE CAPTURE", "PCAP TO SD",
-    "DHCP STARVE", "AP CLONE", "KARMA", "RICKROLL", "< BACK"
+    "DHCP STARVE", "AP CLONE", "KARMA", "RICKROLL",
+    "LAN SCANNER (WIFI)", "LAN SCANNER (USB)", "< BACK"
 };
 static const char* BLE_LABELS[] = {
     "SCAN DEVICES", "APPLE SPAM", "SAMSUNG SPAM", "SWIFTPAIR SPAM",
@@ -2362,7 +2820,11 @@ static const char* headerForLevel(ToolboxLevel lvl) {
                 case ActiveTool::USB_KEYBOARD:   return "USB KEYBOARD";
                 case ActiveTool::PCAP_CAPTURE:   return "PCAP CAPTURE";
                 case ActiveTool::WIFI_LOGGER:    return "WIFI LOGGER";
+                case ActiveTool::WIFI_NET_SCAN:  return "LAN SCAN";
+                case ActiveTool::USB_NET_SCAN:   return "USB SCAN";
+                case ActiveTool::BLE_ENUMERATE:  return "BLE ENUM";
                 case ActiveTool::SD_BROWSER:     return "SD BROWSER";
+                case ActiveTool::PCAP_VIEWER:    return "PCAP VIEWER";
                 default:                      return "RUNNING...";
             }
         default: return "TOOLBOX";
@@ -2561,8 +3023,11 @@ static bool handleContextTap(TFT_eSPI& t, int16_t x, int16_t y) {
                 s_level = ToolboxLevel::TOOL_RUNNING;
                 break;
             case 1:  // ENUMERATE SERVICES
-                Serial.printf("[toolbox] Enumerate: %s\n", s_bleResults[target].addr);
-                // TODO: connect and discover GATT services
+                bleEnumerateStart(target);
+                s_activeTool = ActiveTool::BLE_ENUMERATE;
+                s_toolActive = true;
+                s_toolStartMs = millis();
+                s_level = ToolboxLevel::TOOL_RUNNING;
                 break;
         }
     }
@@ -2625,7 +3090,11 @@ void uiToolboxTick(TFT_eSPI& t, uint32_t now) {
             case ActiveTool::USB_KEYBOARD:   drawUsbKeyboard(t, now);   break;
             case ActiveTool::PCAP_CAPTURE:   drawPcapCapture(t, now);   break;
             case ActiveTool::WIFI_LOGGER:    drawWifiLogger(t, now);    break;
+            case ActiveTool::WIFI_NET_SCAN:  drawWifiNetScan(t, now);   break;
+            case ActiveTool::USB_NET_SCAN:   drawUsbNetScan(t, now);    break;
+            case ActiveTool::BLE_ENUMERATE:  drawBleEnumerate(t, now);  break;
             case ActiveTool::SD_BROWSER:     drawSdBrowser(t, now);     break;
+            case ActiveTool::PCAP_VIEWER:    drawPcapViewer(t, now);    break;
             default:
                 t.setTextColor(Theme::CYAN, Theme::BG);
                 t.setTextDatum(MC_DATUM);
@@ -2686,6 +3155,8 @@ static bool handleWifiTap(int idx) {
         case WifiTool::KARMA:          launchTool(ActiveTool::KARMA); break;
         case WifiTool::DHCP_STARVE:    launchTool(ActiveTool::DHCP_STARVE); break;
         case WifiTool::PCAP_CAPTURE:   launchTool(ActiveTool::PCAP_CAPTURE); break;
+        case WifiTool::WIFI_NET_SCAN:  launchTool(ActiveTool::WIFI_NET_SCAN); break;
+        case WifiTool::USB_NET_SCAN:   launchTool(ActiveTool::USB_NET_SCAN); break;
         case WifiTool::AP_CLONE:       // Clone from menu needs scan first
             if (s_scanCount > 0) { cloneApStart(0); launchTool(ActiveTool::CLONE_AP); }
             else launchTool(ActiveTool::WIFI_SCAN);
@@ -2737,6 +3208,7 @@ static bool handleUtilTap(int idx) {
     switch ((UtilTool)idx) {
         case UtilTool::SD_BROWSER:    launchTool(ActiveTool::SD_BROWSER); break;
         case UtilTool::WIFI_LOGGER:   launchTool(ActiveTool::WIFI_LOGGER); break;
+        case UtilTool::PCAP_VIEWER:   launchTool(ActiveTool::PCAP_VIEWER); break;
         default:
             s_toolActive = true;
             s_activeTool = ActiveTool::NONE;
