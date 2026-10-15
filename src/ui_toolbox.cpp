@@ -3067,111 +3067,53 @@ static char s_wichatInput[129] = {0};
 static int s_wichatInputLen = 0;
 static int s_wichatMsgVer = -1;
 static int s_wichatScroll = 0;
-static bool s_kbShift = false;
+// Use SquatchWatch's native QWERTY keyboard
+#if SQUACH_MESH
+#include "qwerty.h"
+#endif
+static Qwerty::Key s_wcKeys[Qwerty::KEY_N];
+static uint8_t s_wcKeyN = 0;
+static int8_t s_wcArmed = -1;
 
-// Keyboard layout constants (480x320 landscape)
-#define KB_KEY_W    44
-#define KB_KEY_H    36
-#define KB_KEY_GAP  2
-#define KB_ROWS     4
-#define KB_TOTAL_H  (KB_ROWS * (KB_KEY_H + KB_KEY_GAP) + KB_KEY_GAP)
-#define KB_TOP_Y    (320 - KB_TOTAL_H)
-#define KB_BG_COL   0x2104
-#define KB_KEY_COL  0x4208
-#define KB_HL_COL   0x6B4D
+static const char* wcKeyLabel(char c) {
+    static char buf[2];
+    if (c >= 'A' && c <= 'Z') { buf[0] = c + 32; buf[1] = 0; return buf; }
+    if (c == ' ') return "SPC";
+    if (c == Qwerty::BKSP) return "DEL";
+    if (c == Qwerty::CLR) return "CLR";
+    if (c == Qwerty::OK) return "OK";
+    buf[0] = c; buf[1] = 0; return buf;
+}
 
-static const char* kbRow0 = "QWERTYUIOP";
-static const char* kbRow1 = "ASDFGHJKL";
-static const char* kbRow2 = "ZXCVBNM";
-
-static int kbRowStartX(int n) { return (480 - (n * KB_KEY_W + (n-1) * KB_KEY_GAP)) / 2; }
-
-static void kbDrawKey(TFT_eSPI& t, int x, int y, int w, int h, const char* label, uint16_t bg) {
-    t.fillRoundRect(x, y, w, h, 4, bg);
-    t.setTextColor(TFT_WHITE, bg);
+static void wcKbDraw(TFT_eSPI& t, int w, int h) {
+    int bandTop = h / 2 + 10;
+    int bandBot = h - 32;
+    s_wcKeyN = Qwerty::layout(w, bandTop, bandBot, s_wcKeys, true);
+    for (uint8_t i = 0; i < s_wcKeyN; i++) {
+        const Qwerty::Key& k = s_wcKeys[i];
+        bool lit = (s_wcArmed == (int8_t)i);
+        uint16_t bg = lit ? Theme::PURPLE : Theme::TASKBAR;
+        t.fillRoundRect(k.x, k.y, k.w, k.h, 3, bg);
+        t.setTextColor(lit ? Theme::VAPOR_YELLOW : TFT_WHITE, bg);
+        const char* lab = wcKeyLabel(k.ch);
+        t.setTextSize(1);
+        t.setTextDatum(MC_DATUM);
+        t.drawString(lab, k.x + k.w/2, k.y + k.h/2, 2);
+    }
+    // EXIT button at bottom
+    t.fillRoundRect(w - 50, h - 28, 46, 24, 4, TFT_RED);
+    t.setTextColor(TFT_WHITE, TFT_RED);
     t.setTextDatum(MC_DATUM);
-    t.drawString(label, x + w/2, y + h/2, 2);
+    t.drawString("EXIT", w - 27, h - 16, 2);
 }
 
-static void kbDraw(TFT_eSPI& t) {
-    int yb = KB_TOP_Y;
-    t.fillRect(0, yb, 480, KB_TOTAL_H, KB_BG_COL);
-
-    // Row 0: QWERTYUIOP
-    int x = kbRowStartX(10), y = yb + KB_KEY_GAP;
-    for (int i = 0; i < 10; i++) {
-        char l[2] = { kbRow0[i], 0 };
-        if (!s_kbShift) l[0] += 32;
-        kbDrawKey(t, x, y, KB_KEY_W, KB_KEY_H, l, KB_KEY_COL);
-        x += KB_KEY_W + KB_KEY_GAP;
-    }
-    // Row 1: ASDFGHJKL
-    x = kbRowStartX(9); y += KB_KEY_H + KB_KEY_GAP;
-    for (int i = 0; i < 9; i++) {
-        char l[2] = { kbRow1[i], 0 };
-        if (!s_kbShift) l[0] += 32;
-        kbDrawKey(t, x, y, KB_KEY_W, KB_KEY_H, l, KB_KEY_COL);
-        x += KB_KEY_W + KB_KEY_GAP;
-    }
-    // Row 2: ZXCVBNM
-    x = kbRowStartX(7); y += KB_KEY_H + KB_KEY_GAP;
-    for (int i = 0; i < 7; i++) {
-        char l[2] = { kbRow2[i], 0 };
-        if (!s_kbShift) l[0] += 32;
-        kbDrawKey(t, x, y, KB_KEY_W, KB_KEY_H, l, KB_KEY_COL);
-        x += KB_KEY_W + KB_KEY_GAP;
-    }
-    // Row 3: SHFT SPACE BKSP SEND EXIT
-    y += KB_KEY_H + KB_KEY_GAP;
-    int sw = 50, gap = KB_KEY_GAP;
-    int spaceW = 480 - 5*sw - 6*gap;
-    x = gap;
-    kbDrawKey(t, x, y, sw, KB_KEY_H, "SHFT", s_kbShift ? KB_HL_COL : TFT_BLUE); x += sw + gap;
-    kbDrawKey(t, x, y, spaceW, KB_KEY_H, "SPACE", KB_KEY_COL); x += spaceW + gap;
-    kbDrawKey(t, x, y, sw, KB_KEY_H, "BKSP", TFT_BLUE); x += sw + gap;
-    kbDrawKey(t, x, y, sw, KB_KEY_H, "SEND", TFT_DARKGREEN); x += sw + gap;
-    kbDrawKey(t, x, y, sw, KB_KEY_H, "EXIT", TFT_RED);
-}
-
-// Returns: 0=nothing, 'c'=char, '\b'=backspace, '\n'=send, 0x1B=exit, 0x10=shift
-static char kbHandleTap(int16_t tx, int16_t ty) {
-    if (ty < KB_TOP_Y) return 0;
-    int yb = KB_TOP_Y;
-    int row = (ty - yb - KB_KEY_GAP) / (KB_KEY_H + KB_KEY_GAP);
-
-    if (row == 0) {
-        int xs = kbRowStartX(10);
-        int col = (tx - xs) / (KB_KEY_W + KB_KEY_GAP);
-        if (col >= 0 && col < 10 && tx >= xs) {
-            char c = kbRow0[col];
-            if (!s_kbShift) c += 32;
-            return c;
-        }
-    } else if (row == 1) {
-        int xs = kbRowStartX(9);
-        int col = (tx - xs) / (KB_KEY_W + KB_KEY_GAP);
-        if (col >= 0 && col < 9 && tx >= xs) {
-            char c = kbRow1[col];
-            if (!s_kbShift) c += 32;
-            return c;
-        }
-    } else if (row == 2) {
-        int xs = kbRowStartX(7);
-        int col = (tx - xs) / (KB_KEY_W + KB_KEY_GAP);
-        if (col >= 0 && col < 7 && tx >= xs) {
-            char c = kbRow2[col];
-            if (!s_kbShift) c += 32;
-            return c;
-        }
-    } else if (row == 3) {
-        int sw = 50, gap = KB_KEY_GAP;
-        int spaceW = 480 - 5*sw - 6*gap;
-        int x = gap;
-        if (tx >= x && tx < x + sw) { s_kbShift = !s_kbShift; return 0x10; } x += sw + gap;
-        if (tx >= x && tx < x + spaceW) return ' '; x += spaceW + gap;
-        if (tx >= x && tx < x + sw) return '\b'; x += sw + gap;
-        if (tx >= x && tx < x + sw) return '\n'; x += sw + gap;
-        if (tx >= x && tx < x + sw) return 0x1B;  // EXIT
+static char wcKbTap(int16_t x, int16_t y, int w, int h) {
+    // EXIT button
+    if (x >= w - 50 && y >= h - 28) return 0x1B;
+    int k = Qwerty::keyAt(s_wcKeys, s_wcKeyN, x, y, 20);
+    if (k >= 0) {
+        s_wcArmed = (int8_t)k;
+        return s_wcKeys[k].ch;
     }
     return 0;
 }
@@ -3253,17 +3195,17 @@ static void drawWichat(TFT_eSPI& t, uint32_t now) {
     }
 
     // Input bar (above keyboard)
-    int inputY = KB_TOP_Y - 22;
+    int inputY = h / 2 - 10;
     t.fillRect(0, inputY, w, 20, Theme::BG);
     t.drawRect(4, inputY, w - 8, 20, Theme::CYAN);
     t.setTextColor(Theme::VAPOR_YELLOW, Theme::BG);
     t.setTextDatum(ML_DATUM);
     String inputDisp = String(s_wichatInput);
-    if (inputDisp.length() > 40) inputDisp = inputDisp.substring(inputDisp.length() - 40);
+    if (inputDisp.length() > 35) inputDisp = inputDisp.substring(inputDisp.length() - 35);
     t.drawString(inputDisp + "_", 8, inputY + 10, 2);
 
-    // Draw keyboard
-    kbDraw(t);
+    // Draw native SquatchWatch keyboard
+    wcKbDraw(t, w, h);
 
     // Also accept serial input
     while (Serial.available()) {
@@ -3936,27 +3878,35 @@ bool uiToolboxHandleTap(TFT_eSPI& t, int16_t x, int16_t y, uint32_t now) {
             }
             return true;
         }
-        // WiChat: handle keyboard taps
+        // WiChat: handle native keyboard taps
         if (s_activeTool == ActiveTool::WICHAT) {
-            char key = kbHandleTap(x, y);
+            char key = wcKbTap(x, y, t.width(), t.height());
             if (key == 0x1B) {  // EXIT
                 stopActiveTool();
                 s_level = ToolboxLevel::CATEGORIES;
                 s_scroll = 0;
-            } else if (key == '\n') {  // SEND
+            } else if (key == Qwerty::OK) {  // SEND
                 if (s_wichatInputLen > 0) {
                     cyd_mesh_send_chat(s_wichatInput);
                     s_wichatInput[0] = 0;
                     s_wichatInputLen = 0;
                 }
-            } else if (key == '\b') {  // BACKSPACE
+            } else if (key == Qwerty::BKSP) {  // DELETE
                 if (s_wichatInputLen > 0) s_wichatInput[--s_wichatInputLen] = 0;
-            } else if (key == 0x10) {  // SHIFT (already toggled in handler)
-                // nothing extra
-            } else if (key >= 32 && s_wichatInputLen < 128) {
+            } else if (key == Qwerty::CLR) {  // CLEAR ALL
+                s_wichatInput[0] = 0;
+                s_wichatInputLen = 0;
+            } else if (key >= 'A' && key <= 'Z' && s_wichatInputLen < 128) {
+                s_wichatInput[s_wichatInputLen++] = key + 32;  // lowercase
+                s_wichatInput[s_wichatInputLen] = 0;
+            } else if (key == ' ' && s_wichatInputLen < 128) {
+                s_wichatInput[s_wichatInputLen++] = ' ';
+                s_wichatInput[s_wichatInputLen] = 0;
+            } else if (key > 0 && key < 128 && s_wichatInputLen < 128) {
                 s_wichatInput[s_wichatInputLen++] = key;
                 s_wichatInput[s_wichatInputLen] = 0;
             }
+            s_wcArmed = -1;  // clear highlight after short delay
             return true;
         }
         // Everything else: bottom bar stops, other taps ignored
