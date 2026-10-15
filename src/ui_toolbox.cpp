@@ -2522,37 +2522,131 @@ static void drawWifiNetScan(TFT_eSPI& t, uint32_t now) {
 }
 
 // =============================================================================
-//  USB LAN SCANNER — ESP32 as USB Ethernet gadget, scan host network
+//  USB NETWORK ANALYZER — bidirectional serial protocol with host
 // =============================================================================
 static bool s_usbNetActive = false;
-static uint32_t s_usbNetPackets = 0;
+static uint32_t s_usbNetCmds = 0;
+static const int MAX_USB_HOSTS = 20;
+
+struct UsbHostEntry {
+    char ip[16];
+    char mac[18];
+    uint16_t ports[8];
+    int portCount;
+    char os[16];
+};
+static UsbHostEntry s_usbHosts[MAX_USB_HOSTS];
+static int s_usbHostCount = 0;
+static String s_usbStatus = "Waiting for host...";
+
+// Protocol: ESP32 sends JSON commands over serial, host script responds
+// Host->ESP: {"cmd":"results","hosts":[{"ip":"x","mac":"x","ports":[80,443],"os":"Linux"}]}
+// ESP->Host: {"cmd":"scan","range":"192.168.1.0/24","ports":"22,80,443,8080"}
+// ESP->Host: {"cmd":"arp"}
+// ESP->Host: {"cmd":"ifconfig"}
 
 static void usbNetScanStart() {
     s_usbNetActive = true;
-    s_usbNetPackets = 0;
-    // The ESP32-S3 can act as USB CDC-ECM (Ethernet over USB)
-    // For now, use USB Serial to relay scan commands to a host-side tool
-    Serial.println("[toolbox] USB LAN Scanner active");
-    Serial.println("[usb-scan] Send 'SCAN <ip-range>' over serial to start");
-    Serial.println("[usb-scan] Example: SCAN 192.168.1.1-254");
+    s_usbNetCmds = 0;
+    s_usbHostCount = 0;
+    s_usbStatus = "Waiting for host...";
+
+    // Print the host-side script instructions
+    Serial.println();
+    Serial.println("=== SQUATCHWATCH USB NETWORK ANALYZER ===");
+    Serial.println("Protocol: JSON over serial, 115200 baud");
+    Serial.println();
+    Serial.println("Commands from ESP32 -> Host:");
+    Serial.println("  {\"cmd\":\"scan\",\"range\":\"192.168.1.0/24\"}");
+    Serial.println("  {\"cmd\":\"arp\"}");
+    Serial.println("  {\"cmd\":\"ifconfig\"}");
+    Serial.println();
+    Serial.println("Send results back as:");
+    Serial.println("  HOST:<ip>:<mac>:<port1,port2>:<os>");
+    Serial.println("  Example: HOST:192.168.1.1:AA:BB:CC:DD:EE:FF:80,443:Linux");
+    Serial.println("  STATUS:<message>");
+    Serial.println("  DONE");
+    Serial.println();
+    Serial.println("Or type: SCAN to request a scan");
+    Serial.println("=========================================");
+
+    // If connected to WiFi, also offer local scanning
+    if (WiFi.isConnected()) {
+        Serial.printf("WiFi connected: %s (%s)\n", WiFi.SSID().c_str(), WiFi.localIP().toString().c_str());
+        s_usbStatus = "Connected: " + WiFi.localIP().toString();
+    }
+}
+
+static void parseHostLine(const String& line) {
+    if (line.startsWith("HOST:") && s_usbHostCount < MAX_USB_HOSTS) {
+        // Parse HOST:ip:mac:ports:os
+        String data = line.substring(5);
+        int c1 = data.indexOf(':');
+        if (c1 < 0) return;
+
+        UsbHostEntry& h = s_usbHosts[s_usbHostCount];
+        h.portCount = 0;
+
+        // IP
+        strncpy(h.ip, data.substring(0, c1).c_str(), 15);
+        h.ip[15] = 0;
+        data = data.substring(c1 + 1);
+
+        // MAC (17 chars with colons)
+        if (data.length() >= 17) {
+            strncpy(h.mac, data.substring(0, 17).c_str(), 17);
+            h.mac[17] = 0;
+            data = data.substring(18);
+        } else {
+            strcpy(h.mac, "??:??:??:??:??:??");
+        }
+
+        // Ports (comma separated)
+        int c2 = data.indexOf(':');
+        String portStr = (c2 >= 0) ? data.substring(0, c2) : data;
+        int pIdx = 0;
+        while (portStr.length() > 0 && pIdx < 8) {
+            int comma = portStr.indexOf(',');
+            String p = (comma >= 0) ? portStr.substring(0, comma) : portStr;
+            h.ports[pIdx++] = p.toInt();
+            if (comma < 0) break;
+            portStr = portStr.substring(comma + 1);
+        }
+        h.portCount = pIdx;
+
+        // OS
+        if (c2 >= 0 && data.length() > (unsigned)(c2 + 1)) {
+            strncpy(h.os, data.substring(c2 + 1).c_str(), 15);
+        } else {
+            strcpy(h.os, "?");
+        }
+        h.os[15] = 0;
+
+        s_usbHostCount++;
+        Serial.printf("[usb-net] Host: %s %s (%d ports) %s\n", h.ip, h.mac, h.portCount, h.os);
+
+    } else if (line.startsWith("STATUS:")) {
+        s_usbStatus = line.substring(7);
+    } else if (line == "DONE") {
+        s_usbStatus = String(s_usbHostCount) + " hosts found";
+    } else if (line == "SCAN") {
+        // Host requests we initiate a scan command
+        if (WiFi.isConnected()) {
+            IPAddress ip = WiFi.localIP();
+            Serial.printf("{\"cmd\":\"scan\",\"range\":\"%d.%d.%d.0/24\",\"ports\":\"22,80,443,3389,8080\"}\n",
+                          ip[0], ip[1], ip[2]);
+        } else {
+            Serial.println("{\"cmd\":\"scan\",\"range\":\"192.168.1.0/24\",\"ports\":\"22,80,443,8080\"}");
+        }
+        s_usbNetCmds++;
+    }
 }
 
 static void usbNetScanTick() {
-    // Check for serial commands from host
-    if (Serial.available()) {
-        String cmd = Serial.readStringUntil('\n');
-        cmd.trim();
-        if (cmd.startsWith("SCAN ")) {
-            String range = cmd.substring(5);
-            Serial.printf("[usb-scan] Scanning range: %s\n", range.c_str());
-            // Parse IP range and do TCP probe from ESP32's WiFi if connected
-            // Or relay to host-side script
-            s_usbNetPackets++;
-        } else if (cmd == "STATUS") {
-            Serial.printf("[usb-scan] Connected: %s, IP: %s\n",
-                WiFi.isConnected() ? "yes" : "no",
-                WiFi.localIP().toString().c_str());
-        }
+    while (Serial.available()) {
+        String line = Serial.readStringUntil('\n');
+        line.trim();
+        if (line.length() > 0) parseHostLine(line);
     }
 }
 
@@ -2563,34 +2657,67 @@ static void drawUsbNetScan(TFT_eSPI& t, uint32_t now) {
 
     t.setTextColor(Theme::VAPOR_PINK, Theme::BG);
     t.setTextDatum(MC_DATUM);
-    t.drawString("USB LAN SCANNER", w / 2, HEADER_H + 20, 4);
+    t.drawString("USB NET ANALYZER", w / 2, HEADER_H + 15, 4);
 
+    // Status
+    t.setTextColor(Theme::AMBER, Theme::BG);
+    t.drawString(s_usbStatus, w / 2, HEADER_H + 42, 2);
+
+    char buf[48];
+    snprintf(buf, sizeof buf, "Hosts: %d  |  Cmds: %lu", s_usbHostCount, (unsigned long)s_usbNetCmds);
     t.setTextColor(Theme::CYAN, Theme::BG);
-    t.drawString("Plug USB into target PC", w / 2, HEADER_H + 55, 2);
-    t.drawString("Serial commands available:", w / 2, HEADER_H + 80, 2);
+    t.drawString(buf, w / 2, HEADER_H + 60, 1);
 
-    t.setTextDatum(TL_DATUM);
-    t.setTextColor(Theme::GREEN, Theme::BG);
-    t.drawString("SCAN <ip-range>", 30, HEADER_H + 105, 2);
-    t.drawString("STATUS", 30, HEADER_H + 125, 2);
+    // Host list
+    int listTop = HEADER_H + 75;
+    int rowH = 28;
+    int visible = (h - listTop - 30) / rowH;
 
-    t.setTextColor(Theme::VAPOR_PURPLE, Theme::BG);
-    t.setTextDatum(MC_DATUM);
-    char buf[32];
-    snprintf(buf, sizeof buf, "Commands: %lu", (unsigned long)s_usbNetPackets);
-    t.drawString(buf, w / 2, h / 2 + 20, 2);
+    for (int i = 0; i < s_usbHostCount; i++) {
+        int drawIdx = i - s_toolScroll;
+        if (drawIdx < 0 || drawIdx >= visible) continue;
+        int y = listTop + drawIdx * rowH;
+        const UsbHostEntry& host = s_usbHosts[i];
 
-    if (WiFi.isConnected()) {
+        t.fillRect(4, y, w - 8, rowH - 2, Theme::TASKBAR);
+
+        // IP
+        t.setTextColor(Theme::CYAN, Theme::TASKBAR);
+        t.setTextDatum(ML_DATUM);
+        t.drawString(host.ip, 8, y + rowH / 2, 2);
+
+        // Ports
+        String ports = "";
+        for (int p = 0; p < host.portCount && p < 4; p++) {
+            if (p > 0) ports += ",";
+            ports += String(host.ports[p]);
+        }
+        if (host.portCount > 4) ports += "...";
+        t.setTextColor(Theme::GREEN, Theme::TASKBAR);
+        t.setTextDatum(MC_DATUM);
+        t.drawString(ports, w / 2 + 40, y + rowH / 2, 1);
+
+        // OS
+        t.setTextColor(Theme::VAPOR_PURPLE, Theme::TASKBAR);
+        t.setTextDatum(MR_DATUM);
+        t.drawString(host.os, w - 10, y + rowH / 2, 1);
+    }
+
+    if (s_usbHostCount == 0) {
+        t.setTextColor(Theme::VAPOR_PURPLE, Theme::BG);
+        t.setTextDatum(TL_DATUM);
+        int y = listTop + 5;
+        t.drawString("Send over serial:", 12, y, 2);
         t.setTextColor(Theme::GREEN, Theme::BG);
-        snprintf(buf, sizeof buf, "WiFi: %s  %s", WiFi.SSID().c_str(), WiFi.localIP().toString().c_str());
-        t.drawString(buf, w / 2, h / 2 + 50, 2);
-    } else {
-        t.setTextColor(Theme::RED, Theme::BG);
-        t.drawString("WiFi: Not connected", w / 2, h / 2 + 50, 2);
+        t.drawString("SCAN   - request network scan", 12, y + 22, 2);
+        t.drawString("HOST:ip:mac:ports:os", 12, y + 44, 2);
+        t.drawString("STATUS:message", 12, y + 66, 2);
+        t.drawString("DONE   - end of results", 12, y + 88, 2);
     }
 
     t.fillRect(0, h - 24, w, 24, Theme::TASKBAR);
     t.setTextColor(Theme::AMBER, Theme::TASKBAR);
+    t.setTextDatum(MC_DATUM);
     t.drawString("TAP TO STOP", w / 2, h - 12, 2);
 }
 
