@@ -6464,14 +6464,17 @@ void loop() {
         case AppState::TOOLBOX: {
             uiToolboxTouch(tp.valid, tp.x, tp.y, now);
             uiToolboxTick(*canvas, now);
-            // Drag-to-scroll
+            // Drag-to-scroll + tap detection
             {
                 static bool tbDragging = false;
                 static int16_t tbLastY = 0;
+                static int16_t tbDownX = 0, tbDownY = 0;
                 static bool tbMoved = false;
                 if (touchJustDown) {
                     tbDragging = true;
                     tbLastY = tp.y;
+                    tbDownX = tp.x;
+                    tbDownY = tp.y;
                     tbMoved = false;
                     lastTouch = now;
                 }
@@ -6485,8 +6488,8 @@ void loop() {
                 }
                 if (touchJustUp) {
                     if (!tbMoved && tbDragging) {
-                        // It was a tap, not a drag
-                        if (!uiToolboxHandleTap(*canvas, tp.x, tp.y, now)) {
+                        // It was a tap — use the saved down position
+                        if (!uiToolboxHandleTap(*canvas, tbDownX, tbDownY, now)) {
                             uiToolboxStopTool();
                             goHome();
                         }
