@@ -7,8 +7,13 @@
 
 #define WIFI_ATK_NAME "BruceAP"
 
-inline bool wifiConnected() { return WiFi.isConnected(); }
+// Bruce uses wifiConnected as both a variable and function in different modules
+extern bool wifiConnected;
+extern String wifiIP;
+
 inline void cleanlyStopWebUiForWiFiFeature() {}
-inline void ensureWifiPlatform() {}
-inline bool checkLittleFsSize(size_t) { return true; }
-inline bool checkLittleFsSizeNM(size_t) { return true; }
+inline void ensureWifiPlatform() { WiFi.mode(WIFI_STA); }
+inline bool checkLittleFsSize(size_t needed = 0) { (void)needed; return true; }
+inline bool checkLittleFsSizeNM(size_t needed = 0, bool silent = false) { (void)needed; (void)silent; return true; }
+inline void drawStatusBar() {}
+inline void drawStatusBar(bool) {}

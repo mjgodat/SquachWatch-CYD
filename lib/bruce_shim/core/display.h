@@ -40,3 +40,22 @@ inline int loopOptions(std::vector<Option> &options) {
 }
 
 void wifiDisconnect();
+
+// Menu helpers Bruce modules use
+#define MENU_TYPE_MAIN 0
+#define MENU_TYPE_SUBMENU 1
+#define MENU_TYPE_REGULAR 2
+
+inline void addOptionToMainMenu(const String&, std::function<void()>) {}
+inline void displayTextLine(const String &text, int line = 0) {
+    if (bruce_tft) {
+        bruce_tft->setTextDatum(TL_DATUM);
+        bruce_tft->drawString(text, 10, 40 + line * 16, 2);
+    }
+}
+
+// Raw WiFi TX wrapper
+#include <esp_wifi.h>
+inline esp_err_t wifiRawTx(const void* buf, int len) {
+    return esp_wifi_80211_tx(WIFI_IF_STA, buf, len, false);
+}

@@ -13,6 +13,8 @@ volatile bool NextPress = false;
 volatile bool LongPress = false;
 volatile bool returnToMenu = false;
 TouchPoint touchPoint;
+bool wifiConnected = false;
+String wifiIP = "";
 
 // HID stubs
 HIDInterface *hid_usb = nullptr;
