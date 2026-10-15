@@ -1830,15 +1830,49 @@ static void drawHaystack(TFT_eSPI& t, uint32_t now) {
 // =============================================================================
 //  BADUSB — Ducky Script from SD card
 // =============================================================================
-#include <USB.h>
-#include <USBHIDKeyboard.h>
+// USB HID — disabled to prevent USB re-enumeration ding
+// Uncomment when USB tools are needed:
+// #include <USB.h>
+// #include <USBHIDKeyboard.h>
+#define USB_HID_DISABLED 1
 
+#ifdef USB_HID_DISABLED
+// USB HID disabled — stub everything out
+static void* s_usbKb = nullptr;
+#define KEY_RETURN 0
+#define KEY_TAB 0
+#define KEY_ESC 0
+#define KEY_BACKSPACE 0
+#define KEY_DELETE 0
+#define KEY_UP_ARROW 0
+#define KEY_DOWN_ARROW 0
+#define KEY_LEFT_ARROW 0
+#define KEY_RIGHT_ARROW 0
+#define KEY_LEFT_GUI 0
+#define KEY_LEFT_ALT 0
+#define KEY_LEFT_CTRL 0
+#define KEY_LEFT_SHIFT 0
+#else
 static USBHIDKeyboard* s_usbKb = nullptr;
+#endif
 static bool s_usbRunning = false;
 static String s_duckyFile = "";
 static int s_duckyLine = 0;
 static int s_duckyTotal = 0;
 
+#ifdef USB_HID_DISABLED
+static void badUsbStart() { Serial.println("[toolbox] USB HID disabled in this build"); }
+static void usbKeyboardStart() { Serial.println("[toolbox] USB HID disabled in this build"); }
+static void drawBadUsb(TFT_eSPI& t, uint32_t now) {
+    t.setTextColor(Theme::RED, Theme::BG); t.setTextDatum(MC_DATUM);
+    t.drawString("USB HID DISABLED", t.width()/2, t.height()/2, 4);
+    t.setTextColor(Theme::AMBER, Theme::BG);
+    t.drawString("Rebuild with USB.h enabled", t.width()/2, t.height()/2+30, 2);
+    t.fillRect(0, t.height()-24, t.width(), 24, Theme::TASKBAR);
+    t.setTextColor(Theme::AMBER, Theme::TASKBAR); t.drawString("TAP TO STOP", t.width()/2, t.height()-12, 2);
+}
+static void drawUsbKeyboard(TFT_eSPI& t, uint32_t now) { drawBadUsb(t, now); }
+#else
 static void badUsbStart() {
     s_usbRunning = false;
     s_duckyLine = 0;
@@ -2003,6 +2037,7 @@ static void drawUsbKeyboard(TFT_eSPI& t, uint32_t now) {
     t.setTextColor(Theme::AMBER, Theme::TASKBAR);
     t.drawString("TAP TO STOP", w / 2, h - 12, 2);
 }
+#endif // !USB_HID_DISABLED
 
 // =============================================================================
 //  PCAP CAPTURE — save WiFi frames to SD in PCAP format
@@ -2564,6 +2599,17 @@ static String s_reconLines[60];
 static int s_reconLineCount = 0;
 static String s_reconStatus = "";
 
+#ifdef USB_HID_DISABLED
+static void reconTypeCmd(const char*) {}
+static void usbNetScanStart() { Serial.println("[toolbox] USB HID disabled"); }
+static void drawUsbNetScan(TFT_eSPI& t, uint32_t now) {
+    t.setTextColor(Theme::RED, Theme::BG); t.setTextDatum(MC_DATUM);
+    t.drawString("USB HID DISABLED", t.width()/2, t.height()/2, 4);
+    t.fillRect(0, t.height()-24, t.width(), 24, Theme::TASKBAR);
+    t.setTextColor(Theme::AMBER, Theme::TASKBAR); t.drawString("TAP TO STOP", t.width()/2, t.height()-12, 2);
+}
+static void usbNetScanTick() {}
+#else
 static void reconTypeCmd(const char* cmd) {
     if (!s_usbKb) return;
     s_usbKb->print(cmd);
@@ -2791,6 +2837,7 @@ static void drawUsbNetScan(TFT_eSPI& t, uint32_t now) {
     t.setTextDatum(MC_DATUM);
     t.drawString("TAP TO STOP", w / 2, h - 12, 2);
 }
+#endif // !USB_HID_DISABLED
 
 // =============================================================================
 //  BLE ENUMERATE — connect and discover GATT services
@@ -3466,7 +3513,9 @@ static void stopActiveTool() {
             break;
         case ActiveTool::BADUSB_DUCKY:
         case ActiveTool::USB_KEYBOARD:
+#ifndef USB_HID_DISABLED
             if (s_usbKb) { s_usbKb->releaseAll(); }
+#endif
             break;
         case ActiveTool::PCAP_CAPTURE:
             pcapCaptureStop();
