@@ -113,7 +113,7 @@ static void drawWifiScan(TFT_eSPI& t, uint32_t now) {
     if (s_scanning) {
         snprintf(buf, sizeof buf, "Scanning...");
     } else {
-        snprintf(buf, sizeof buf, "Found %d networks  [TAP=rescan]", s_scanCount);
+        snprintf(buf, sizeof buf, "Found %d  [TAP HERE=rescan]", s_scanCount);
     }
     t.drawString(buf, 8, statusY, 2);
 
@@ -430,7 +430,7 @@ static void drawBleScan(TFT_eSPI& t, uint32_t now) {
     t.setTextDatum(TL_DATUM);
     char buf[48];
     if (s_bleScanning) snprintf(buf, sizeof buf, "BLE scanning... (%d found)", s_bleCount);
-    else snprintf(buf, sizeof buf, "Found %d devices  [TAP=rescan]", s_bleCount);
+    else snprintf(buf, sizeof buf, "Found %d  [TAP HERE=rescan]", s_bleCount);
     t.drawString(buf, 8, statusY, 2);
 
     int listTop = statusY + 20;
@@ -731,33 +731,46 @@ static bool handleUtilTap(int idx) {
 
 bool uiToolboxHandleTap(TFT_eSPI& t, int16_t x, int16_t y, uint32_t now) {
     if (s_level == ToolboxLevel::TOOL_RUNNING) {
-        // WiFi scan: tap to rescan when scan is done
-        if (s_activeTool == ActiveTool::WIFI_SCAN && !s_scanning) {
-            // Tap on bottom bar = stop, tap elsewhere = rescan
-            if (y > t.height() - 30) {
+        const int hh = t.height();
+        const bool tapBottom = (y > hh - 30);
+        const bool tapHeader = (y < HEADER_H + 22);  // header + status line
+
+        // WiFi scan
+        if (s_activeTool == ActiveTool::WIFI_SCAN) {
+            if (tapBottom) {
                 stopActiveTool();
                 s_level = ToolboxLevel::WIFI_TOOLS;
                 s_scroll = 0;
-            } else {
-                wifiScanStart();
+            } else if (tapHeader && !s_scanning) {
+                wifiScanStart();  // rescan only from header tap
+            } else if (!tapHeader && s_scanCount > 0) {
+                // Tap on a result row = select it
+                int listTop = HEADER_H + 22;
+                int row = (y - listTop) / (RESULT_H + RESULT_PAD) + s_toolScroll;
+                if (row >= 0 && row < s_scanCount) {
+                    s_scanSelected = row;
+                    Serial.printf("[toolbox] selected network: %s\n", s_scanResults[row].ssid);
+                }
             }
             return true;
         }
-        // BLE scan: tap to rescan when done
-        if (s_activeTool == ActiveTool::BLE_SCAN && !s_bleScanning) {
-            if (y > t.height() - 30) {
+        // BLE scan
+        if (s_activeTool == ActiveTool::BLE_SCAN) {
+            if (tapBottom) {
                 stopActiveTool();
                 s_level = ToolboxLevel::BLE_TOOLS;
                 s_scroll = 0;
-            } else {
-                bleScanStart();
+            } else if (tapHeader && !s_bleScanning) {
+                bleScanStart();  // rescan only from header tap
             }
             return true;
         }
-        // Everything else: tap stops
-        stopActiveTool();
-        s_level = ToolboxLevel::CATEGORIES;
-        s_scroll = 0;
+        // Everything else: bottom bar stops, other taps ignored
+        if (tapBottom) {
+            stopActiveTool();
+            s_level = ToolboxLevel::CATEGORIES;
+            s_scroll = 0;
+        }
         return true;
     }
 
