@@ -17,7 +17,7 @@
 enum class ActiveTool : uint8_t {
     NONE = 0, WIFI_SCAN, DEAUTH, BEACON_SPAM, RICKROLL, CLONE_AP, EVIL_PORTAL,
     PROBE_SNIFF, KARMA, DHCP_STARVE, PCAP_CAPTURE, WIFI_LOGGER,
-    WIFI_NET_SCAN, USB_NET_SCAN,
+    WIFI_NET_SCAN, USB_NET_SCAN, HANDSHAKE_CAP,
     BLE_SCAN, BLE_TRACK, APPLE_SPAM, SAMSUNG_SPAM, SWIFTPAIR_SPAM,
     FLIPPER_DETECT, AIRTAG_SPOOF, HAYSTACK, BLE_ENUMERATE,
     BADUSB_DUCKY, USB_KEYBOARD,
@@ -2118,6 +2118,193 @@ static void drawPcapCapture(TFT_eSPI& t, uint32_t now) {
 }
 
 // =============================================================================
+//  HANDSHAKE/PMKID CAPTURE — from Bruce's sniffer.cpp EAPOL logic
+// =============================================================================
+// EAPOL detection — ported from Bruce firmware modules/wifi/sniffer.cpp
+static bool isItEAPOL(const wifi_promiscuous_pkt_t *pkt) {
+    const uint8_t *p = pkt->payload;
+    int len = pkt->rx_ctrl.sig_len;
+    if (len < 36) return false;
+    // LLC/SNAP: AA-AA-03-00-00-00-88-8E = EAPOL
+    if (p[24]==0xAA && p[25]==0xAA && p[26]==0x03 && p[27]==0x00 &&
+        p[28]==0x00 && p[29]==0x00 && p[30]==0x88 && p[31]==0x8E) return true;
+    // QoS data shifts LLC/SNAP by 2
+    if ((p[0] & 0x0F) == 0x08) {
+        if (p[26]==0xAA && p[27]==0xAA && p[28]==0x03 && p[29]==0x00 &&
+            p[30]==0x00 && p[31]==0x00 && p[32]==0x88 && p[33]==0x8E) return true;
+    }
+    return false;
+}
+
+static int classifyEapolMsg(const wifi_promiscuous_pkt_t *pkt) {
+    const uint8_t *p = pkt->payload;
+    int qos = ((p[0] & 0x0F) == 0x08) ? 2 : 0;
+    int off = 24 + qos + 8 + 4 + 1;  // MAC + LLC/SNAP + EAPOL hdr + descriptor
+    if (pkt->rx_ctrl.sig_len < off + 2) return -1;
+    uint16_t keyInfo = (p[off] << 8) | p[off + 1];
+    bool install = keyInfo & (1 << 6);
+    bool ack     = keyInfo & (1 << 7);
+    bool mic     = keyInfo & (1 << 8);
+    bool secure  = keyInfo & (1 << 9);
+    if (ack && !mic && !install) return 1;
+    if (!ack && mic && !install && !secure) return 2;
+    if (ack && mic && install) return 3;
+    if (!ack && mic && !install && secure) return 4;
+    return -1;
+}
+
+static bool matchesBssid(const wifi_promiscuous_pkt_t *pkt, const uint8_t bssid[6]) {
+    const uint8_t *p = pkt->payload;
+    return memcmp(p + 4, bssid, 6) == 0 || memcmp(p + 10, bssid, 6) == 0 || memcmp(p + 16, bssid, 6) == 0;
+}
+
+static uint8_t s_hsBssid[6] = {0};
+static char s_hsSsid[33] = {0};
+static uint8_t s_hsChan = 0;
+static bool s_hsMsg[5] = {false};  // [1]-[4] = handshake msgs
+static int s_hsEapolCount = 0;
+static uint32_t s_hsBeacons = 0;
+static fs::File s_hsFile;
+static bool s_hsFileOpen = false;
+static bool s_hsComplete = false;
+
+static void IRAM_ATTR hsSniffCb(void* buf, wifi_promiscuous_pkt_type_t type) {
+    if (type != WIFI_PKT_MGMT && type != WIFI_PKT_DATA) return;
+    const wifi_promiscuous_pkt_t* pkt = (wifi_promiscuous_pkt_t*)buf;
+    int len = pkt->rx_ctrl.sig_len;
+    if (len <= 0 || len > 2500) return;
+
+    // Only process frames from our target BSSID
+    if (!matchesBssid(pkt, s_hsBssid)) return;
+
+    bool isBeacon = (pkt->payload[0] & 0xFC) == 0x80;
+    bool eapol = false;
+    int msg = -1;
+
+    if (type == WIFI_PKT_DATA && isItEAPOL(pkt)) {
+        eapol = true;
+        msg = classifyEapolMsg(pkt);
+        if (msg >= 1 && msg <= 4) {
+            s_hsMsg[msg] = true;
+            s_hsEapolCount++;
+            Serial.printf("[handshake] EAPOL M%d captured\n", msg);
+        }
+    }
+
+    // Write to PCAP if it's a beacon or EAPOL frame
+    if (s_hsFileOpen && (isBeacon || eapol)) {
+        uint32_t ts_sec = millis() / 1000;
+        uint32_t ts_usec = (millis() % 1000) * 1000;
+        uint32_t incl = len, orig = len;
+        uint8_t phdr[16];
+        memcpy(phdr, &ts_sec, 4); memcpy(phdr+4, &ts_usec, 4);
+        memcpy(phdr+8, &incl, 4); memcpy(phdr+12, &orig, 4);
+        s_hsFile.write(phdr, 16);
+        s_hsFile.write(pkt->payload, len);
+        if (isBeacon) s_hsBeacons++;
+    }
+
+    // Check if complete handshake captured
+    if (s_hsMsg[1] && s_hsMsg[2] && s_hsMsg[3] && s_hsMsg[4]) {
+        s_hsComplete = true;
+    }
+}
+
+static void handshakeCaptureStart(int scanIdx) {
+    if (scanIdx < 0 || scanIdx >= s_scanCount) return;
+    memcpy(s_hsBssid, s_scanResults[scanIdx].bssid, 6);
+    strncpy(s_hsSsid, s_scanResults[scanIdx].ssid, 32);
+    s_hsChan = s_scanResults[scanIdx].channel;
+    memset(s_hsMsg, 0, sizeof s_hsMsg);
+    s_hsEapolCount = 0;
+    s_hsBeacons = 0;
+    s_hsComplete = false;
+    s_hsFileOpen = false;
+
+    // Open PCAP file on SD
+    SD_MMC.setPins(5, 4, 6, 7, 2, 3);
+    if (SD_MMC.begin("/sd", false, false)) {
+        char fname[48];
+        snprintf(fname, sizeof fname, "/hs_%s_%lu.pcap", s_hsSsid, millis());
+        // sanitize filename
+        for (char* p = fname + 4; *p; p++) { if (*p == ' ' || *p == '/') *p = '_'; }
+        s_hsFile = SD_MMC.open(fname, FILE_WRITE);
+        if (s_hsFile) {
+            uint8_t hdr[24] = {0xD4,0xC3,0xB2,0xA1, 0x02,0x00,0x04,0x00,
+                               0,0,0,0, 0,0,0,0, 0xFF,0xFF,0x00,0x00, 0x69,0x00,0x00,0x00};
+            s_hsFile.write(hdr, 24);
+            s_hsFileOpen = true;
+            Serial.printf("[handshake] Capturing to %s\n", fname);
+        }
+    }
+
+    WiFi.mode(WIFI_STA);
+    WiFi.disconnect();
+    esp_wifi_set_channel(s_hsChan, WIFI_SECOND_CHAN_NONE);
+    esp_wifi_set_promiscuous(true);
+    esp_wifi_set_promiscuous_rx_cb(hsSniffCb);
+    Serial.printf("[handshake] Listening for %s on CH%d\n", s_hsSsid, s_hsChan);
+}
+
+static void handshakeCaptureStop() {
+    esp_wifi_set_promiscuous(false);
+    if (s_hsFileOpen) { s_hsFile.flush(); s_hsFile.close(); s_hsFileOpen = false; }
+    WiFi.mode(WIFI_OFF);
+}
+
+static void drawHandshakeCapture(TFT_eSPI& t, uint32_t now) {
+    const int w = t.width();
+    const int h = t.height();
+
+    t.setTextColor(Theme::RED, Theme::BG);
+    t.setTextDatum(MC_DATUM);
+    t.drawString("HANDSHAKE CAPTURE", w / 2, HEADER_H + 15, 4);
+
+    t.setTextColor(Theme::CYAN, Theme::BG);
+    char buf[48];
+    snprintf(buf, sizeof buf, "%s  CH%d", s_hsSsid, s_hsChan);
+    t.drawString(buf, w / 2, HEADER_H + 45, 2);
+
+    snprintf(buf, sizeof buf, "%02X:%02X:%02X:%02X:%02X:%02X",
+             s_hsBssid[0],s_hsBssid[1],s_hsBssid[2],s_hsBssid[3],s_hsBssid[4],s_hsBssid[5]);
+    t.setTextColor(Theme::VAPOR_PURPLE, Theme::BG);
+    t.drawString(buf, w / 2, HEADER_H + 65, 2);
+
+    // 4-way handshake progress
+    int boxW = 60, boxH = 40, gap = 15;
+    int startX = (w - (boxW * 4 + gap * 3)) / 2;
+    int boxY = HEADER_H + 90;
+    for (int i = 1; i <= 4; i++) {
+        int x = startX + (i - 1) * (boxW + gap);
+        uint16_t bg = s_hsMsg[i] ? Theme::GREEN : Theme::TASKBAR;
+        uint16_t fg = s_hsMsg[i] ? Theme::BG : Theme::AMBER;
+        t.fillRoundRect(x, boxY, boxW, boxH, 5, bg);
+        t.setTextColor(fg, bg);
+        t.setTextDatum(MC_DATUM);
+        snprintf(buf, sizeof buf, "M%d", i);
+        t.drawString(buf, x + boxW/2, boxY + boxH/2, 4);
+    }
+
+    if (s_hsComplete) {
+        t.setTextColor(Theme::GREEN, Theme::BG);
+        t.drawString("HANDSHAKE COMPLETE!", w / 2, boxY + boxH + 20, 4);
+        t.drawString("Saved to SD card", w / 2, boxY + boxH + 50, 2);
+    } else {
+        t.setTextColor(Theme::AMBER, Theme::BG);
+        snprintf(buf, sizeof buf, "EAPOL: %d  |  Beacons: %lu", s_hsEapolCount, (unsigned long)s_hsBeacons);
+        t.drawString(buf, w / 2, boxY + boxH + 20, 2);
+        t.setTextColor(Theme::VAPOR_YELLOW, Theme::BG);
+        t.drawString("Waiting for client to connect...", w / 2, boxY + boxH + 45, 2);
+        t.drawString("(deauth a client to force reconnect)", w / 2, boxY + boxH + 65, 1);
+    }
+
+    t.fillRect(0, h - 24, w, 24, Theme::TASKBAR);
+    t.setTextColor(Theme::AMBER, Theme::TASKBAR);
+    t.setTextDatum(MC_DATUM);
+    t.drawString("TAP TO STOP", w / 2, h - 12, 2);
+}
+
+// =============================================================================
 //  WIFI LOGGER — log all visible networks to SD
 // =============================================================================
 static uint32_t s_wifiLogCount = 0;
@@ -2698,6 +2885,9 @@ static void stopActiveTool() {
         case ActiveTool::WIFI_LOGGER:
             wifiLoggerStop();
             break;
+        case ActiveTool::HANDSHAKE_CAP:
+            handshakeCaptureStop();
+            break;
         case ActiveTool::WIFI_NET_SCAN:
             s_lanScanning = false;
             break;
@@ -2747,6 +2937,7 @@ static void launchTool(ActiveTool tool) {
         case ActiveTool::USB_KEYBOARD:   usbKeyboardStart();    break;
         case ActiveTool::PCAP_CAPTURE:   pcapCaptureStart();    break;
         case ActiveTool::WIFI_LOGGER:    wifiLoggerStart();     break;
+        case ActiveTool::HANDSHAKE_CAP:  /* started via handshakeCaptureStart() */ break;
         case ActiveTool::WIFI_NET_SCAN:  wifiNetScanStart();    break;
         case ActiveTool::USB_NET_SCAN:   usbNetScanStart();     break;
         case ActiveTool::BLE_ENUMERATE:  /* started via bleEnumerateStart() */ break;
@@ -2820,6 +3011,7 @@ static const char* headerForLevel(ToolboxLevel lvl) {
                 case ActiveTool::USB_KEYBOARD:   return "USB KEYBOARD";
                 case ActiveTool::PCAP_CAPTURE:   return "PCAP CAPTURE";
                 case ActiveTool::WIFI_LOGGER:    return "WIFI LOGGER";
+                case ActiveTool::HANDSHAKE_CAP:  return "HANDSHAKE";
                 case ActiveTool::WIFI_NET_SCAN:  return "LAN SCAN";
                 case ActiveTool::USB_NET_SCAN:   return "USB SCAN";
                 case ActiveTool::BLE_ENUMERATE:  return "BLE ENUM";
@@ -3007,9 +3199,18 @@ static bool handleContextTap(TFT_eSPI& t, int16_t x, int16_t y) {
                 cloneApStart(target);
                 launchTool(ActiveTool::CLONE_AP);
                 break;
+            case 2:  // CAPTURE HANDSHAKE
+            case 3:  // CAPTURE PMKID (same capture, looks for PMKID in M1)
+                handshakeCaptureStart(target);
+                s_activeTool = ActiveTool::HANDSHAKE_CAP;
+                s_toolActive = true;
+                s_toolStartMs = millis();
+                s_level = ToolboxLevel::TOOL_RUNNING;
+                break;
+            case 4:  // MONITOR (PCAP)
+                launchTool(ActiveTool::PCAP_CAPTURE);
+                break;
             default:
-                Serial.printf("[toolbox] %s on %s — not yet implemented\n",
-                              WIFI_CTX_LABELS[row], s_scanResults[target].ssid);
                 break;
         }
     } else if (s_contextType == ContextType::BLE) {
@@ -3090,6 +3291,7 @@ void uiToolboxTick(TFT_eSPI& t, uint32_t now) {
             case ActiveTool::USB_KEYBOARD:   drawUsbKeyboard(t, now);   break;
             case ActiveTool::PCAP_CAPTURE:   drawPcapCapture(t, now);   break;
             case ActiveTool::WIFI_LOGGER:    drawWifiLogger(t, now);    break;
+            case ActiveTool::HANDSHAKE_CAP:  drawHandshakeCapture(t, now); break;
             case ActiveTool::WIFI_NET_SCAN:  drawWifiNetScan(t, now);   break;
             case ActiveTool::USB_NET_SCAN:   drawUsbNetScan(t, now);    break;
             case ActiveTool::BLE_ENUMERATE:  drawBleEnumerate(t, now);  break;
