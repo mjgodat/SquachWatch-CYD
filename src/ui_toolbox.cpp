@@ -1442,6 +1442,174 @@ static void drawBleTrack(TFT_eSPI& t, uint32_t now) {
 }
 
 // =============================================================================
+//  FLIPPER DETECT — scan for Flipper Zero devices via BLE
+// =============================================================================
+static int s_flipperCount = 0;
+static bool s_flipperScanning = false;
+struct FlipperResult {
+    char addr[18];
+    int rssi;
+    char name[25];
+};
+static const int MAX_FLIPPERS = 10;
+static FlipperResult s_flippers[MAX_FLIPPERS];
+
+// Flipper Zero uses MAC prefix 80:E1:26 (Flipper Devices Inc)
+static bool isFlipperMac(const char* addr) {
+    return (strncmp(addr, "80:e1:26", 8) == 0 || strncmp(addr, "80:E1:26", 8) == 0);
+}
+
+class FlipperBleCallbacks : public NimBLEScanCallbacks {
+    void onResult(const NimBLEAdvertisedDevice* dev) override {
+        const char* addr = dev->getAddress().toString().c_str();
+        const char* name = dev->getName().c_str();
+        bool isFlipper = isFlipperMac(addr);
+        // Also check for "Flipper" in the device name
+        if (!isFlipper && name && strstr(name, "Flipper")) isFlipper = true;
+        if (!isFlipper) return;
+        // Check for duplicate
+        for (int i = 0; i < s_flipperCount; i++) {
+            if (strcmp(s_flippers[i].addr, addr) == 0) {
+                s_flippers[i].rssi = dev->getRSSI();
+                return;
+            }
+        }
+        if (s_flipperCount >= MAX_FLIPPERS) return;
+        FlipperResult& r = s_flippers[s_flipperCount];
+        strncpy(r.addr, addr, 17); r.addr[17] = 0;
+        r.rssi = dev->getRSSI();
+        if (name && name[0]) strncpy(r.name, name, 24);
+        else strcpy(r.name, "Flipper Zero");
+        r.name[24] = 0;
+        s_flipperCount++;
+        Serial.printf("[toolbox] Flipper found: %s %s %ddBm\n", r.name, r.addr, r.rssi);
+    }
+};
+static FlipperBleCallbacks s_flipperCb;
+
+static void flipperDetectStart() {
+    s_flipperCount = 0;
+    s_flipperScanning = true;
+    if (!NimBLEDevice::isInitialized()) NimBLEDevice::init("");
+    NimBLEScan* scan = NimBLEDevice::getScan();
+    scan->setScanCallbacks(&s_flipperCb, false);
+    scan->setActiveScan(true);
+    scan->setInterval(100);
+    scan->setWindow(99);
+    scan->start(15, false);  // 15 second scan
+    Serial.println("[toolbox] Flipper detect started");
+}
+
+static void drawFlipperDetect(TFT_eSPI& t, uint32_t now) {
+    const int w = t.width();
+    const int h = t.height();
+
+    NimBLEScan* scan = NimBLEDevice::getScan();
+    if (scan && !scan->isScanning()) s_flipperScanning = false;
+
+    t.setTextColor(Theme::VAPOR_PINK, Theme::BG);
+    t.setTextDatum(MC_DATUM);
+    t.drawString("FLIPPER DETECT", w / 2, HEADER_H + 20, 4);
+
+    char buf[48];
+    t.setTextColor(Theme::AMBER, Theme::BG);
+    if (s_flipperScanning) snprintf(buf, sizeof buf, "Scanning... (%d found)", s_flipperCount);
+    else snprintf(buf, sizeof buf, "Done. %d Flipper(s) found.", s_flipperCount);
+    t.drawString(buf, w / 2, HEADER_H + 50, 2);
+
+    if (s_flipperCount == 0 && !s_flipperScanning) {
+        t.setTextColor(Theme::GREEN, Theme::BG);
+        t.drawString("No Flippers detected", w / 2, h / 2, 4);
+    }
+
+    int listY = HEADER_H + 80;
+    for (int i = 0; i < s_flipperCount; i++) {
+        t.fillRect(4, listY + i * 35, w - 8, 30, Theme::TASKBAR);
+        t.setTextColor(Theme::RED, Theme::TASKBAR);
+        t.setTextDatum(ML_DATUM);
+        t.drawString(s_flippers[i].name, 10, listY + i * 35 + 15, 2);
+        t.setTextColor(Theme::CYAN, Theme::TASKBAR);
+        t.setTextDatum(MR_DATUM);
+        snprintf(buf, sizeof buf, "%s  %ddBm", s_flippers[i].addr, s_flippers[i].rssi);
+        t.drawString(buf, w - 10, listY + i * 35 + 15, 1);
+    }
+
+    t.fillRect(0, h - 24, w, 24, Theme::TASKBAR);
+    t.setTextColor(Theme::AMBER, Theme::TASKBAR);
+    t.setTextDatum(MC_DATUM);
+    t.drawString(s_flipperScanning ? "SCANNING..." : "TAP TO STOP", w / 2, h - 12, 2);
+}
+
+// =============================================================================
+//  SD BROWSER — browse files on the SD card
+// =============================================================================
+#include <FS.h>
+#include <SD_MMC.h>
+static String s_sdPath = "/";
+static String s_sdFiles[30];
+static int s_sdFileCount = 0;
+static int s_sdSelected = -1;
+
+static void sdBrowseDir(const String& path) {
+    s_sdPath = path;
+    s_sdFileCount = 0;
+    s_sdSelected = -1;
+    SD_MMC.setPins(5, 4, 6, 7, 2, 3);
+    if (!SD_MMC.begin("/sd", false, false)) {
+        Serial.println("[toolbox] SD mount failed");
+        return;
+    }
+    fs::File dir = SD_MMC.open(path);
+    if (!dir || !dir.isDirectory()) { dir.close(); return; }
+    fs::File entry;
+    while ((entry = dir.openNextFile()) && s_sdFileCount < 30) {
+        String name = entry.name();
+        if (entry.isDirectory()) name += "/";
+        s_sdFiles[s_sdFileCount++] = name;
+        entry.close();
+    }
+    dir.close();
+    Serial.printf("[toolbox] SD browse: %s (%d entries)\n", path.c_str(), s_sdFileCount);
+}
+
+static void sdBrowserStart() {
+    sdBrowseDir("/");
+}
+
+static void drawSdBrowser(TFT_eSPI& t, uint32_t now) {
+    const int w = t.width();
+    const int h = t.height();
+
+    t.setTextColor(Theme::VAPOR_YELLOW, Theme::BG);
+    t.setTextDatum(TL_DATUM);
+    char buf[48];
+    snprintf(buf, sizeof buf, "SD: %s  (%d items)", s_sdPath.c_str(), s_sdFileCount);
+    t.drawString(buf, 8, HEADER_H + 4, 2);
+
+    int listTop = HEADER_H + 24;
+    int rowH = 22;
+    int visible = (h - listTop - 30) / rowH;
+
+    for (int i = 0; i < s_sdFileCount; i++) {
+        int drawIdx = i - s_toolScroll;
+        if (drawIdx < 0 || drawIdx >= visible) continue;
+        int y = listTop + drawIdx * rowH;
+        bool isDir = s_sdFiles[i].endsWith("/");
+        bool sel = (i == s_sdSelected);
+
+        t.fillRect(4, y, w - 8, rowH - 2, sel ? Theme::PURPLE : Theme::TASKBAR);
+        t.setTextColor(isDir ? Theme::AMBER : Theme::CYAN, sel ? Theme::PURPLE : Theme::TASKBAR);
+        t.setTextDatum(ML_DATUM);
+        t.drawString(s_sdFiles[i], 10, y + rowH / 2, 2);
+    }
+
+    t.fillRect(0, h - 24, w, 24, Theme::TASKBAR);
+    t.setTextColor(Theme::AMBER, Theme::TASKBAR);
+    t.setTextDatum(MC_DATUM);
+    t.drawString("TAP TO STOP", w / 2, h - 12, 2);
+}
+
+// =============================================================================
 //  Tool stop / cleanup
 // =============================================================================
 static void stopActiveTool() {
@@ -1481,6 +1649,13 @@ static void stopActiveTool() {
         case ActiveTool::BLE_TRACK:
             if (s_pTrackScan && s_pTrackScan->isScanning()) s_pTrackScan->stop();
             break;
+        case ActiveTool::FLIPPER_DETECT: {
+            NimBLEScan* sc = NimBLEDevice::getScan();
+            if (sc && sc->isScanning()) sc->stop();
+            break;
+        }
+        case ActiveTool::SD_BROWSER:
+            break;
         default: break;
     }
     s_activeTool = ActiveTool::NONE;
@@ -1510,6 +1685,8 @@ static void launchTool(ActiveTool tool) {
         case ActiveTool::SAMSUNG_SPAM:  samsungSpamStart(); break;
         case ActiveTool::SWIFTPAIR_SPAM: swiftPairStart();  break;
         case ActiveTool::BLE_TRACK:      /* started via bleTrackStart() */ break;
+        case ActiveTool::FLIPPER_DETECT: flipperDetectStart(); break;
+        case ActiveTool::SD_BROWSER:     sdBrowserStart();     break;
         default: break;
     }
 }
@@ -1569,6 +1746,8 @@ static const char* headerForLevel(ToolboxLevel lvl) {
                 case ActiveTool::SAMSUNG_SPAM:  return "SAMSUNG SPAM";
                 case ActiveTool::SWIFTPAIR_SPAM: return "SWIFTPAIR";
                 case ActiveTool::BLE_TRACK:      return "BLE TRACK";
+                case ActiveTool::FLIPPER_DETECT: return "FLIPPER DETECT";
+                case ActiveTool::SD_BROWSER:     return "SD BROWSER";
                 default:                      return "RUNNING...";
             }
         default: return "TOOLBOX";
@@ -1823,6 +2002,8 @@ void uiToolboxTick(TFT_eSPI& t, uint32_t now) {
             case ActiveTool::SAMSUNG_SPAM:  drawSamsungSpam(t, now);    break;
             case ActiveTool::SWIFTPAIR_SPAM: drawSwiftPairSpam(t, now); break;
             case ActiveTool::BLE_TRACK:      drawBleTrack(t, now);      break;
+            case ActiveTool::FLIPPER_DETECT: drawFlipperDetect(t, now); break;
+            case ActiveTool::SD_BROWSER:     drawSdBrowser(t, now);     break;
             default:
                 t.setTextColor(Theme::CYAN, Theme::BG);
                 t.setTextDatum(MC_DATUM);
@@ -1897,6 +2078,7 @@ static bool handleBleTap(int idx) {
         case BleTool::APPLE_SPAM:     launchTool(ActiveTool::APPLE_SPAM); break;
         case BleTool::SAMSUNG_SPAM:   launchTool(ActiveTool::SAMSUNG_SPAM); break;
         case BleTool::SWIFTPAIR_SPAM: launchTool(ActiveTool::SWIFTPAIR_SPAM); break;
+        case BleTool::FLIPPER_DETECT: launchTool(ActiveTool::FLIPPER_DETECT); break;
         default:
             s_toolActive = true;
             s_activeTool = ActiveTool::NONE;
@@ -1916,9 +2098,14 @@ static bool handleUsbTap(int idx) {
 
 static bool handleUtilTap(int idx) {
     if ((UtilTool)idx == UtilTool::BACK) { s_level = ToolboxLevel::CATEGORIES; s_scroll = 0; return true; }
-    s_toolActive = true;
-    s_activeTool = ActiveTool::NONE;
-    s_level = ToolboxLevel::TOOL_RUNNING;
+    switch ((UtilTool)idx) {
+        case UtilTool::SD_BROWSER: launchTool(ActiveTool::SD_BROWSER); break;
+        default:
+            s_toolActive = true;
+            s_activeTool = ActiveTool::NONE;
+            s_level = ToolboxLevel::TOOL_RUNNING;
+            break;
+    }
     return true;
 }
 
