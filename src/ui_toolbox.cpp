@@ -1078,6 +1078,109 @@ static void drawSwiftPairSpam(TFT_eSPI& t, uint32_t now) {
 }
 
 // =============================================================================
+//  BLE TRACK — live RSSI signal strength for a targeted device
+// =============================================================================
+static char s_trackAddr[18] = {0};
+static char s_trackName[25] = {0};
+static int  s_trackRssi = -100;
+static int  s_trackRssiMin = 0;
+static int  s_trackRssiMax = -100;
+static uint32_t s_trackLastSeen = 0;
+static bool s_trackFound = false;
+static NimBLEScan* s_pTrackScan = nullptr;
+
+class TrackBleCallbacks : public NimBLEScanCallbacks {
+    void onResult(const NimBLEAdvertisedDevice* dev) override {
+        if (strcmp(dev->getAddress().toString().c_str(), s_trackAddr) == 0) {
+            s_trackRssi = dev->getRSSI();
+            s_trackLastSeen = millis();
+            s_trackFound = true;
+            if (s_trackRssi < s_trackRssiMin) s_trackRssiMin = s_trackRssi;
+            if (s_trackRssi > s_trackRssiMax) s_trackRssiMax = s_trackRssi;
+        }
+    }
+};
+static TrackBleCallbacks s_trackCallbacks;
+
+static void bleTrackStart(int bleIdx) {
+    if (bleIdx < 0 || bleIdx >= s_bleCount) return;
+    strncpy(s_trackAddr, s_bleResults[bleIdx].addr, 17);
+    s_trackAddr[17] = 0;
+    strncpy(s_trackName, s_bleResults[bleIdx].name, 24);
+    s_trackName[24] = 0;
+    s_trackRssi = s_bleResults[bleIdx].rssi;
+    s_trackRssiMin = 0;
+    s_trackRssiMax = -100;
+    s_trackLastSeen = millis();
+    s_trackFound = false;
+
+    if (!NimBLEDevice::isInitialized()) NimBLEDevice::init("");
+    s_pTrackScan = NimBLEDevice::getScan();
+    s_pTrackScan->setScanCallbacks(&s_trackCallbacks, false);
+    s_pTrackScan->setActiveScan(false);
+    s_pTrackScan->setInterval(50);
+    s_pTrackScan->setWindow(49);
+    s_pTrackScan->start(0, false);  // continuous scan
+    Serial.printf("[toolbox] BLE track started: %s %s\n", s_trackName, s_trackAddr);
+}
+
+static void drawBleTrack(TFT_eSPI& t, uint32_t now) {
+    const int w = t.width();
+    const int h = t.height();
+
+    t.setTextColor(Theme::CYAN, Theme::BG);
+    t.setTextDatum(MC_DATUM);
+    t.drawString(s_trackName, w / 2, HEADER_H + 15, 2);
+    t.setTextColor(Theme::VAPOR_PURPLE, Theme::BG);
+    t.drawString(s_trackAddr, w / 2, HEADER_H + 35, 2);
+
+    bool lost = (now - s_trackLastSeen) > 5000;
+    if (lost) {
+        t.setTextColor(Theme::RED, Theme::BG);
+        t.drawString("SIGNAL LOST", w / 2, HEADER_H + 55, 2);
+    }
+
+    char buf[16];
+    snprintf(buf, sizeof buf, "%d", s_trackRssi);
+    t.setTextColor(lost ? Theme::RED : Theme::GREEN, Theme::BG);
+    t.setTextDatum(MC_DATUM);
+    t.drawString(buf, w / 2, h / 2 - 10, 7);
+    t.setTextColor(Theme::AMBER, Theme::BG);
+    t.drawString("dBm", w / 2, h / 2 + 30, 2);
+
+    int barY = h / 2 + 50;
+    int barH = 20;
+    float pct = constrain((s_trackRssi + 90.0f) / 60.0f, 0.0f, 1.0f);
+    int barW = (int)((w - 20) * pct);
+    uint16_t barCol = pct > 0.6f ? Theme::GREEN : pct > 0.3f ? Theme::AMBER : Theme::RED;
+    t.fillRect(10, barY, w - 20, barH, Theme::TASKBAR);
+    if (barW > 0) t.fillRect(10, barY, barW, barH, barCol);
+
+    t.setTextColor(Theme::VAPOR_PURPLE, Theme::BG);
+    t.setTextDatum(TL_DATUM);
+    snprintf(buf, sizeof buf, "MIN: %d", s_trackRssiMin);
+    t.drawString(buf, 10, barY + barH + 8, 2);
+    t.setTextDatum(TR_DATUM);
+    snprintf(buf, sizeof buf, "MAX: %d", s_trackRssiMax);
+    t.drawString(buf, w - 10, barY + barH + 8, 2);
+
+    t.setTextDatum(MC_DATUM);
+    const char* prox;
+    if (s_trackRssi > -40) prox = "VERY CLOSE (< 1m)";
+    else if (s_trackRssi > -55) prox = "CLOSE (1-3m)";
+    else if (s_trackRssi > -70) prox = "NEARBY (3-8m)";
+    else if (s_trackRssi > -85) prox = "FAR (8-15m)";
+    else prox = "VERY FAR (> 15m)";
+    t.setTextColor(barCol, Theme::BG);
+    t.drawString(prox, w / 2, barY + barH + 30, 2);
+
+    t.fillRect(0, h - 24, w, 24, Theme::TASKBAR);
+    t.setTextColor(Theme::AMBER, Theme::TASKBAR);
+    t.setTextDatum(MC_DATUM);
+    t.drawString("TAP TO STOP", w / 2, h - 12, 2);
+}
+
+// =============================================================================
 //  Tool stop / cleanup
 // =============================================================================
 static void stopActiveTool() {
@@ -1108,6 +1211,9 @@ static void stopActiveTool() {
         case ActiveTool::SWIFTPAIR_SPAM:
             if (s_pAdv) { s_pAdv->stop(); s_pAdv = nullptr; }
             break;
+        case ActiveTool::BLE_TRACK:
+            if (s_pTrackScan && s_pTrackScan->isScanning()) s_pTrackScan->stop();
+            break;
         default: break;
     }
     s_activeTool = ActiveTool::NONE;
@@ -1134,6 +1240,7 @@ static void launchTool(ActiveTool tool) {
         case ActiveTool::APPLE_SPAM:    appleSpamStart();   break;
         case ActiveTool::SAMSUNG_SPAM:  samsungSpamStart(); break;
         case ActiveTool::SWIFTPAIR_SPAM: swiftPairStart();  break;
+        case ActiveTool::BLE_TRACK:      /* started via bleTrackStart() */ break;
         default: break;
     }
 }
@@ -1190,6 +1297,7 @@ static const char* headerForLevel(ToolboxLevel lvl) {
                 case ActiveTool::APPLE_SPAM:    return "APPLE SPAM";
                 case ActiveTool::SAMSUNG_SPAM:  return "SAMSUNG SPAM";
                 case ActiveTool::SWIFTPAIR_SPAM: return "SWIFTPAIR";
+                case ActiveTool::BLE_TRACK:      return "BLE TRACK";
                 default:                      return "RUNNING...";
             }
         default: return "TOOLBOX";
@@ -1381,9 +1489,11 @@ static bool handleContextTap(TFT_eSPI& t, int16_t x, int16_t y) {
         if (target < 0 || target >= s_bleCount) return true;
         switch (row) {
             case 0:  // TRACK SIGNAL
-                Serial.printf("[toolbox] Track: %s %s\n",
-                              s_bleResults[target].name, s_bleResults[target].addr);
-                // TODO: implement BLE RSSI tracker for this device
+                bleTrackStart(target);
+                s_activeTool = ActiveTool::BLE_TRACK;
+                s_toolActive = true;
+                s_toolStartMs = millis();
+                s_level = ToolboxLevel::TOOL_RUNNING;
                 break;
             case 1:  // ENUMERATE SERVICES
                 Serial.printf("[toolbox] Enumerate: %s\n", s_bleResults[target].addr);
@@ -1439,6 +1549,7 @@ void uiToolboxTick(TFT_eSPI& t, uint32_t now) {
             case ActiveTool::APPLE_SPAM:    drawAppleSpam(t, now);      break;
             case ActiveTool::SAMSUNG_SPAM:  drawSamsungSpam(t, now);    break;
             case ActiveTool::SWIFTPAIR_SPAM: drawSwiftPairSpam(t, now); break;
+            case ActiveTool::BLE_TRACK:      drawBleTrack(t, now);      break;
             default:
                 t.setTextColor(Theme::CYAN, Theme::BG);
                 t.setTextDatum(MC_DATUM);
