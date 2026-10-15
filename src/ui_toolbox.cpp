@@ -129,8 +129,8 @@ void uiToolboxTick(TFT_eSPI& t, uint32_t now) {
     const int w = t.width();
     const int h = t.height();
 
-    // Background — use the active theme background
-    Theme::drawActiveBackground(t, now, 0, h);
+    // Background — solid theme color (no DetectionEngine dependency here)
+    t.fillRect(0, 0, w, h, Theme::BG);
 
     // Header bar
     t.fillRect(0, 0, w, HEADER_H, Theme::TASKBAR);
