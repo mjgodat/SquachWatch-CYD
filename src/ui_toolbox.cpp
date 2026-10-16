@@ -1816,11 +1816,12 @@ static void drawHaystack(TFT_eSPI& t, uint32_t now) {
 // =============================================================================
 //  BADUSB — Ducky Script from SD card
 // =============================================================================
-// USB HID — disabled to prevent USB re-enumeration ding
-// Uncomment when USB tools are needed:
-// #include <USB.h>
-// #include <USBHIDKeyboard.h>
-#define USB_HID_DISABLED 1
+// USB HID — re-enabled for BadUSB/USB Keyboard/USB Recon tools
+// Note: HID init causes USB re-enumeration (Windows ding sound)
+// Research pending for clean composite device initialization
+#include <USB.h>
+#include <USBHIDKeyboard.h>
+// #define USB_HID_DISABLED 1
 
 #ifdef USB_HID_DISABLED
 // USB HID disabled — stub everything out
