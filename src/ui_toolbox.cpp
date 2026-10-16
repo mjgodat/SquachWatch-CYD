@@ -123,7 +123,9 @@ static void wifiScanUpdate() {
         s_scanResults[i].rssi = WiFi.RSSI(i);
         s_scanResults[i].channel = WiFi.channel(i);
         s_scanResults[i].encType = WiFi.encryptionType(i);
-        memcpy(s_scanResults[i].bssid, WiFi.BSSID(i), 6);
+        const uint8_t* bssid = WiFi.BSSID(i);
+        if (bssid) memcpy(s_scanResults[i].bssid, bssid, 6);
+        else memset(s_scanResults[i].bssid, 0, 6);
     }
     WiFi.scanDelete();
     s_scanning = false;
@@ -665,8 +667,8 @@ static void drawEvilPortal(TFT_eSPI& t, uint32_t now) {
     const int w = t.width();
     const int h = t.height();
 
-    s_portalDns->processNextRequest();
-    s_portalWeb->handleClient();
+    if (s_portalDns) s_portalDns->processNextRequest();
+    if (s_portalWeb) s_portalWeb->handleClient();
 
     t.setTextColor(Theme::RED, Theme::BG);
     t.setTextDatum(MC_DATUM);
@@ -1038,11 +1040,12 @@ class ToolboxBleCallbacks : public NimBLEScanCallbacks {
     void onResult(const NimBLEAdvertisedDevice* dev) override {
         if (s_bleCount >= MAX_BLE_RESULTS) return;
         BleResult& r = s_bleResults[s_bleCount];
-        const char* n = dev->getName().c_str();
-        if (n && n[0]) strncpy(r.name, n, 24);
+        std::string nameStr = dev->getName();
+        if (nameStr.size() > 0) strncpy(r.name, nameStr.c_str(), 24);
         else strcpy(r.name, "<unknown>");
         r.name[24] = 0;
-        snprintf(r.addr, sizeof r.addr, "%s", dev->getAddress().toString().c_str());
+        std::string addrStr = dev->getAddress().toString();
+        snprintf(r.addr, sizeof r.addr, "%s", addrStr.c_str());
         r.rssi = dev->getRSSI();
         r.appearance = dev->getAppearance();
         s_bleCount++;
@@ -1407,7 +1410,8 @@ static NimBLEScan* s_pTrackScan = nullptr;
 
 class TrackBleCallbacks : public NimBLEScanCallbacks {
     void onResult(const NimBLEAdvertisedDevice* dev) override {
-        if (strcmp(dev->getAddress().toString().c_str(), s_trackAddr) == 0) {
+        std::string devAddr = dev->getAddress().toString();
+        if (strcmp(devAddr.c_str(), s_trackAddr) == 0) {
             s_trackRssi = dev->getRSSI();
             s_trackLastSeen = millis();
             s_trackFound = true;
@@ -1516,13 +1520,13 @@ static bool isFlipperMac(const char* addr) {
 
 class FlipperBleCallbacks : public NimBLEScanCallbacks {
     void onResult(const NimBLEAdvertisedDevice* dev) override {
-        const char* addr = dev->getAddress().toString().c_str();
-        const char* name = dev->getName().c_str();
+        std::string addrStr = dev->getAddress().toString();
+        std::string nameStr = dev->getName();
+        const char* addr = addrStr.c_str();
+        const char* name = nameStr.c_str();
         bool isFlipper = isFlipperMac(addr);
-        // Also check for "Flipper" in the device name
-        if (!isFlipper && name && strstr(name, "Flipper")) isFlipper = true;
+        if (!isFlipper && nameStr.size() > 0 && strstr(name, "Flipper")) isFlipper = true;
         if (!isFlipper) return;
-        // Check for duplicate
         for (int i = 0; i < s_flipperCount; i++) {
             if (strcmp(s_flippers[i].addr, addr) == 0) {
                 s_flippers[i].rssi = dev->getRSSI();
@@ -2188,12 +2192,18 @@ static fs::File s_hsFile;
 static bool s_hsFileOpen = false;
 static bool s_hsComplete = false;
 
+static uint32_t s_hsHookCalls = 0;
+static uint32_t s_hsBssidMatch = 0;
+static uint32_t s_hsDataFrames = 0;
+
 static void hsSniffHook(const wifi_promiscuous_pkt_t* pkt, uint16_t rawLen) {
+    s_hsHookCalls++;
     int len = pkt->rx_ctrl.sig_len;
     if (len <= 0 || len > 2500) return;
 
     // Only process frames from our target BSSID
     if (!matchesBssid(pkt, s_hsBssid)) return;
+    s_hsBssidMatch++;
 
     bool isBeacon = (pkt->payload[0] & 0xFC) == 0x80;
     bool eapol = false;
@@ -2201,6 +2211,7 @@ static void hsSniffHook(const wifi_promiscuous_pkt_t* pkt, uint16_t rawLen) {
 
     // Check for data frames (type=2 in frame control) that contain EAPOL
     uint8_t frameType = (pkt->payload[0] & 0x0C) >> 2;
+    if (frameType == 2) s_hsDataFrames++;
     if (frameType == 2 && isItEAPOL(pkt)) {
         eapol = true;
         msg = classifyEapolMsg(pkt);
@@ -2261,7 +2272,12 @@ static void handshakeCaptureStart(int scanIdx) {
     // Use the capture hook — don't replace SquatchWatch's promiscuous callback
     wichat_set_capture_hook(hsSniffHook);
     wichat_pin_channel(s_hsChan);
-    Serial.printf("[handshake] Listening for %s on CH%d (via hook)\n", s_hsSsid, s_hsChan);
+    // FORCE channel switch immediately — don't wait for scanner to hop
+    esp_wifi_set_channel(s_hsChan, WIFI_SECOND_CHAN_NONE);
+    Serial.printf("[handshake] Listening for %s on CH%d BSSID=%02X:%02X:%02X:%02X:%02X:%02X\n",
+        s_hsSsid, s_hsChan,
+        s_hsBssid[0], s_hsBssid[1], s_hsBssid[2],
+        s_hsBssid[3], s_hsBssid[4], s_hsBssid[5]);
 }
 
 static void handshakeCaptureStop() {
@@ -2313,7 +2329,12 @@ static void drawHandshakeCapture(TFT_eSPI& t, uint32_t now) {
         t.drawString(buf, w / 2, boxY + boxH + 20, 2);
         t.setTextColor(Theme::VAPOR_YELLOW, Theme::BG);
         t.drawString("Waiting for client to connect...", w / 2, boxY + boxH + 45, 2);
-        t.drawString("(deauth a client to force reconnect)", w / 2, boxY + boxH + 65, 1);
+
+        // Debug counters
+        snprintf(buf, sizeof buf, "hook:%lu bssid:%lu data:%lu",
+                 (unsigned long)s_hsHookCalls, (unsigned long)s_hsBssidMatch, (unsigned long)s_hsDataFrames);
+        t.setTextColor(Theme::VAPOR_PURPLE, Theme::BG);
+        t.drawString(buf, w / 2, boxY + boxH + 65, 1);
     }
 
     t.fillRect(0, h - 24, w, 24, Theme::TASKBAR);
@@ -2360,7 +2381,11 @@ static void drawWifiLogger(TFT_eSPI& t, uint32_t now) {
     // Periodic scan every 10 seconds
     if (now - s_wifiLogLastScan > 10000) {
         s_wifiLogLastScan = now;
-        int n = WiFi.scanNetworks(false, true);
+        int n = WiFi.scanComplete();
+        if (n == WIFI_SCAN_FAILED || n == WIFI_SCAN_RUNNING) {
+            if (n != WIFI_SCAN_RUNNING) WiFi.scanNetworks(true, true);  // async
+            return;
+        }
         if (n > 0 && s_wifiLogOpen) {
             for (int i = 0; i < n; i++) {
                 s_wifiLogFile.printf("%lu,%s,%s,%d,%d,%d\n",
@@ -3440,27 +3465,24 @@ static void drawWichat(TFT_eSPI& t, uint32_t now) {
 // =============================================================================
 static void stopActiveTool() {
     switch (s_activeTool) {
+        // NEVER call WiFi.mode(WIFI_OFF) — it kills SquatchWatch's
+        // promiscuous mode scanner. Just clean up tool-specific state.
         case ActiveTool::WIFI_SCAN:
             WiFi.scanDelete();
-            WiFi.mode(WIFI_OFF);
             break;
         case ActiveTool::DEAUTH:
-            WiFi.mode(WIFI_OFF);
             break;
         case ActiveTool::BEACON_SPAM:
         case ActiveTool::RICKROLL:
-            WiFi.mode(WIFI_OFF);
             break;
         case ActiveTool::CLONE_AP:
             WiFi.softAPdisconnect(true);
-            WiFi.mode(WIFI_OFF);
             break;
         case ActiveTool::KARMA:
             karmaStop();
             break;
         case ActiveTool::DHCP_STARVE:
             WiFi.disconnect();
-            WiFi.mode(WIFI_OFF);
             break;
         case ActiveTool::EVIL_PORTAL:
             evilPortalStop();
