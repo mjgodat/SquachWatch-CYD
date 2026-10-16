@@ -86,6 +86,7 @@ static void cydGpsTick(uint32_t now);
 #include "dex.h"
 #include "ui_dex.h"
 #include "ui_toolbox.h"
+#include "cli.h"
 #include "regulars.h"
 #include "notices.h"
 #include "theme.h"            // the crash card on the splash
@@ -4746,6 +4747,8 @@ void setup() {
 #if SQW_SPEAKER
     bootStage(10);
 #endif
+    // CLI serial command interface
+    cli_init();
 }
 
 // ---- PRIM: what each drawing primitive costs on the real sprite ----
@@ -5700,6 +5703,8 @@ static void bootButtonTick(uint32_t now) {
 
 
 void loop() {
+    // CLI serial command interface — processes commands from USB serial
+    cli_poll();
     // Cheap and unconditional: available() is a register read, and this
     // is the only way in for the one serial command the firmware takes.
     Clock::pollSerial();
