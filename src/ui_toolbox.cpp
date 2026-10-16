@@ -1825,7 +1825,7 @@ static void drawHaystack(TFT_eSPI& t, uint32_t now) {
 // This creates a stable CDC+HID composite device with NO re-enumeration
 #include <USB.h>
 #include <USBHIDKeyboard.h>
-static USBHIDKeyboard s_globalKb;  // GLOBAL — constructor registers HID before app_main
+USBHIDKeyboard s_globalKb;  // GLOBAL — constructor registers HID before app_main
 // #define USB_HID_DISABLED 1
 
 // Payload state — always available regardless of HID

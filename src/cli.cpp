@@ -1,6 +1,7 @@
 /* cli.cpp -- Serial command interface for remote operation & test automation */
 #include "cli.h"
 #include <Arduino.h>
+#include <WiFi.h>
 #include <string.h>
 #include <stdlib.h>
 
@@ -92,7 +93,9 @@ static void cmd_help(void) {
     Serial.println("[DATA] heap                  Memory info");
     Serial.println("[DATA] uptime                Uptime");
     Serial.println("[DATA] reboot                Restart");
-    Serial.println("[DATA] wifi scan|stop|list   WiFi tools");
+    Serial.println("[DATA] wifi scan|stop|list   WiFi scanning");
+    Serial.println("[DATA] wifi connect <ssid> <pass>  Join network");
+    Serial.println("[DATA] wifi disconnect|status|ip   Connection");
     Serial.println("[DATA] ble scan|stop|list    BLE tools");
     Serial.println("[DATA] chat send|ping|nodes|channel|name|status");
     Serial.println("[DATA] hid run|type|key      HID injection");
@@ -204,8 +207,52 @@ static void cmd_wifi(const char *args) {
     } else if (strncmp(args, "list", 4) == 0) {
         if (cb && cb->wifi_list) { cb->wifi_list(); }
         else Serial.println("[ERR] wifi list not available");
+    } else if (strncmp(args, "connect ", 8) == 0) {
+        // wifi connect <ssid> <password>
+        char ssid[33] = {0}, pass[65] = {0};
+        const char *p = args + 8;
+        // Parse SSID (may be quoted)
+        if (*p == '"') {
+            p++;
+            int i = 0;
+            while (*p && *p != '"' && i < 32) ssid[i++] = *p++;
+            if (*p == '"') p++;
+            if (*p == ' ') p++;
+        } else {
+            int i = 0;
+            while (*p && *p != ' ' && i < 32) ssid[i++] = *p++;
+            if (*p == ' ') p++;
+        }
+        strncpy(pass, p, 64);
+        WiFi.mode(WIFI_STA);
+        WiFi.begin(ssid, pass);
+        Serial.printf("[OK] Connecting to '%s'...\n", ssid);
+        unsigned long start = millis();
+        while (!WiFi.isConnected() && millis() - start < 15000) {
+            delay(500);
+            Serial.print(".");
+        }
+        Serial.println();
+        if (WiFi.isConnected()) {
+            Serial.printf("[OK] Connected! IP: %s\n", WiFi.localIP().toString().c_str());
+        } else {
+            Serial.println("[ERR] Connection failed (timeout)");
+        }
+    } else if (strcmp(args, "disconnect") == 0) {
+        WiFi.disconnect();
+        Serial.println("[OK] Disconnected");
+    } else if (strcmp(args, "status") == 0) {
+        if (WiFi.isConnected()) {
+            Serial.printf("[DATA] Connected: %s  IP: %s  RSSI: %d  CH: %d\n",
+                WiFi.SSID().c_str(), WiFi.localIP().toString().c_str(),
+                WiFi.RSSI(), WiFi.channel());
+        } else {
+            Serial.println("[DATA] Not connected");
+        }
+    } else if (strcmp(args, "ip") == 0) {
+        Serial.printf("[DATA] %s\n", WiFi.isConnected() ? WiFi.localIP().toString().c_str() : "not connected");
     } else {
-        Serial.println("[ERR] wifi: scan|stop|list");
+        Serial.println("[ERR] wifi: scan|stop|list|connect <ssid> <pass>|disconnect|status|ip");
     }
 }
 

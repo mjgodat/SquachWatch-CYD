@@ -4748,6 +4748,8 @@ void setup() {
     bootStage(10);
 #endif
     // CLI serial command interface
+    extern void cli_bridge_init();
+    cli_bridge_init();
     cli_init();
 }
 
