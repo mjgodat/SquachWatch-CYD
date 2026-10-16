@@ -75,6 +75,10 @@ static const int BLE_CTX_COUNT = 3;
 static int s_bleSelected = -1;
 
 // ---- Layout ----
+// Forward declarations for keyboard (defined in WiChat section)
+static void wcKbDraw(TFT_eSPI& t, int w, int h);
+static char wcKbTap(int16_t x, int16_t y, int w, int h);
+
 static const int ROW_H     = 42;
 static const int ROW_PAD   = 6;
 static const int HEADER_H  = 36;
@@ -2492,25 +2496,39 @@ static int s_lanProgress = 0;
 static int s_lanTotal = 254;
 static String s_lanSSID = "";
 
+// WiFi LAN scanner states
+enum class LanState : uint8_t { PICK_NETWORK, ENTER_PASS, CONNECTING, SCANNING };
+static LanState s_lanState = LanState::PICK_NETWORK;
+static char s_lanPass[65] = {0};
+static int s_lanPassLen = 0;
+static int s_lanNetSelected = -1;
+static uint32_t s_lanConnectMs = 0;
+
 static void wifiNetScanStart() {
     s_lanHostCount = 0;
-    s_lanScanning = true;
+    s_lanScanning = false;
     s_lanProgress = 0;
+    s_lanPassLen = 0;
+    s_lanPass[0] = 0;
+    s_lanNetSelected = -1;
 
-    // Need to be connected to a WiFi network
-    if (!WiFi.isConnected()) {
-        // Try to connect to last known network, or just start scanning
-        WiFi.mode(WIFI_STA);
-        // If no saved network, prompt needed — for now just scan from current connection
+    if (WiFi.isConnected()) {
+        // Already connected — go straight to scanning
         s_lanSSID = WiFi.SSID();
-        if (s_lanSSID.length() == 0) {
-            Serial.println("[toolbox] Not connected to WiFi — connect first");
-            s_lanScanning = false;
-            return;
+        s_lanState = LanState::SCANNING;
+        s_lanScanning = true;
+        Serial.printf("[toolbox] LAN scan on %s (%s)\n", s_lanSSID.c_str(), WiFi.localIP().toString().c_str());
+    } else {
+        // Need to pick a network first — run a WiFi scan
+        s_lanState = LanState::PICK_NETWORK;
+        if (s_scanCount == 0) {
+            WiFi.mode(WIFI_STA);
+            WiFi.disconnect();
+            WiFi.scanNetworks(true, true);
+            s_scanning = true;
         }
+        Serial.println("[toolbox] LAN scanner: pick a network to connect");
     }
-    s_lanSSID = WiFi.SSID();
-    Serial.printf("[toolbox] LAN scan on %s (%s)\n", s_lanSSID.c_str(), WiFi.localIP().toString().c_str());
 }
 
 static void wifiNetScanTick() {
@@ -2555,6 +2573,86 @@ static void wifiNetScanTick() {
 static void drawWifiNetScan(TFT_eSPI& t, uint32_t now) {
     const int w = t.width();
     const int h = t.height();
+
+    // State: pick network
+    if (s_lanState == LanState::PICK_NETWORK) {
+        if (s_scanning) wifiScanUpdate();
+
+        t.setTextColor(Theme::CYAN, Theme::BG);
+        t.setTextDatum(MC_DATUM);
+        t.drawString("SELECT NETWORK", w / 2, HEADER_H + 10, 2);
+
+        char buf[32];
+        if (s_scanning) snprintf(buf, sizeof buf, "Scanning...");
+        else snprintf(buf, sizeof buf, "%d networks  [LONG PRESS=connect]", s_scanCount);
+        t.setTextColor(Theme::AMBER, Theme::BG);
+        t.drawString(buf, w / 2, HEADER_H + 28, 1);
+
+        int listTop = HEADER_H + 40;
+        int visible = (h - listTop - 28) / (RESULT_H + RESULT_PAD);
+        for (int i = 0; i < s_scanCount; i++) {
+            int drawIdx = i - s_toolScroll;
+            if (drawIdx < 0 || drawIdx >= visible) continue;
+            int y = listTop + drawIdx * (RESULT_H + RESULT_PAD);
+            bool sel = (i == s_lanNetSelected);
+            t.fillRect(4, y, w - 8, RESULT_H, sel ? Theme::PURPLE : Theme::TASKBAR);
+            t.setTextColor(Theme::CYAN, sel ? Theme::PURPLE : Theme::TASKBAR);
+            t.setTextDatum(ML_DATUM);
+            t.drawString(s_scanResults[i].ssid, 8, y + RESULT_H / 2, 2);
+            t.setTextColor(Theme::AMBER, sel ? Theme::PURPLE : Theme::TASKBAR);
+            t.setTextDatum(MR_DATUM);
+            snprintf(buf, sizeof buf, "CH%d %ddBm", s_scanResults[i].channel, (int)s_scanResults[i].rssi);
+            t.drawString(buf, w - 10, y + RESULT_H / 2, 1);
+        }
+        t.fillRect(0, h - 24, w, 24, Theme::TASKBAR);
+        t.setTextColor(Theme::AMBER, Theme::TASKBAR);
+        t.setTextDatum(MC_DATUM);
+        t.drawString("TAP TO STOP", w / 2, h - 12, 2);
+        return;
+    }
+
+    // State: enter password
+    if (s_lanState == LanState::ENTER_PASS) {
+        t.setTextColor(Theme::CYAN, Theme::BG);
+        t.setTextDatum(MC_DATUM);
+        t.drawString("ENTER PASSWORD", w / 2, HEADER_H + 10, 2);
+        if (s_lanNetSelected >= 0 && s_lanNetSelected < s_scanCount) {
+            t.setTextColor(Theme::VAPOR_PINK, Theme::BG);
+            t.drawString(s_scanResults[s_lanNetSelected].ssid, w / 2, HEADER_H + 30, 2);
+        }
+        // Password input bar
+        int inputY = h / 2 - 40;
+        t.fillRect(10, inputY, w - 20, 22, Theme::TASKBAR);
+        t.drawRect(10, inputY, w - 20, 22, Theme::CYAN);
+        t.setTextColor(Theme::VAPOR_YELLOW, Theme::TASKBAR);
+        t.setTextDatum(ML_DATUM);
+        t.drawString(String(s_lanPass) + "_", 14, inputY + 11, 2);
+        // Keyboard
+        wcKbDraw(t, w, h);
+        return;
+    }
+
+    // State: connecting
+    if (s_lanState == LanState::CONNECTING) {
+        t.setTextColor(Theme::AMBER, Theme::BG);
+        t.setTextDatum(MC_DATUM);
+        t.drawString("CONNECTING...", w / 2, h / 2 - 20, 4);
+        if (s_lanNetSelected >= 0 && s_lanNetSelected < s_scanCount)
+            t.drawString(s_scanResults[s_lanNetSelected].ssid, w / 2, h / 2 + 20, 2);
+        if (WiFi.isConnected()) {
+            s_lanState = LanState::SCANNING;
+            s_lanSSID = WiFi.SSID();
+            s_lanScanning = true;
+            s_lanProgress = 0;
+            Serial.printf("[toolbox] Connected! LAN scan starting on %s\n", s_lanSSID.c_str());
+        } else if (now - s_lanConnectMs > 15000) {
+            Serial.println("[toolbox] WiFi connect timeout");
+            s_lanState = LanState::PICK_NETWORK;
+        }
+        return;
+    }
+
+    // State: scanning LAN
     wifiNetScanTick();
 
     t.setTextColor(Theme::CYAN, Theme::BG);
@@ -3790,8 +3888,18 @@ void uiToolboxTouch(bool down, int16_t x, int16_t y, uint32_t now) {
         } else if (now - s_downMs >= LONG_PRESS_MS) {
             s_longPressFired = true;
             // Fire long press
-            if (s_level == ToolboxLevel::TOOL_RUNNING && s_activeTool == ActiveTool::WICHAT) {
-                // WiChat: long press opens function menu
+            if (s_level == ToolboxLevel::TOOL_RUNNING && s_activeTool == ActiveTool::WIFI_NET_SCAN
+                && s_lanState == LanState::PICK_NETWORK) {
+                int listTop = HEADER_H + 40;
+                int row = (s_downY - listTop) / (RESULT_H + RESULT_PAD) + s_toolScroll;
+                if (row >= 0 && row < s_scanCount) {
+                    s_lanNetSelected = row;
+                    s_lanPassLen = 0; s_lanPass[0] = 0;
+                    s_lanState = LanState::ENTER_PASS;
+                    Serial.printf("[toolbox] Enter password for %s\n", s_scanResults[row].ssid);
+                }
+            }
+            else if (s_level == ToolboxLevel::TOOL_RUNNING && s_activeTool == ActiveTool::WICHAT) {
                 s_wcFnMenuOpen = true;
                 Serial.println("[wichat] fn menu opened via long press");
             }
@@ -4177,6 +4285,52 @@ bool uiToolboxHandleTap(TFT_eSPI& t, int16_t x, int16_t y, uint32_t now) {
                 bleScanStart();  // rescan only from header tap
             }
             return true;
+        }
+        // WiFi LAN Scanner: handle network selection and password entry
+        if (s_activeTool == ActiveTool::WIFI_NET_SCAN) {
+            if (s_lanState == LanState::PICK_NETWORK) {
+                if (tapBottom) {
+                    stopActiveTool();
+                    s_level = ToolboxLevel::CATEGORIES;
+                    s_scroll = 0;
+                    return true;
+                }
+                // Tap on a network row — select it
+                int listTop = HEADER_H + 40;
+                int row = (y - listTop) / (RESULT_H + RESULT_PAD) + s_toolScroll;
+                if (row >= 0 && row < s_scanCount) s_lanNetSelected = row;
+                return true;
+            }
+            if (s_lanState == LanState::ENTER_PASS) {
+                char key = wcKbTap(x, y, t.width(), t.height());
+                if (key == 0x1B) {  // EXIT — back to network list
+                    s_lanState = LanState::PICK_NETWORK;
+                } else if (key == Qwerty::OK) {  // OK — connect
+                    if (s_lanNetSelected >= 0 && s_lanNetSelected < s_scanCount) {
+                        WiFi.mode(WIFI_STA);
+                        WiFi.begin(s_scanResults[s_lanNetSelected].ssid, s_lanPass);
+                        s_lanState = LanState::CONNECTING;
+                        s_lanConnectMs = millis();
+                        Serial.printf("[toolbox] Connecting to %s...\n", s_scanResults[s_lanNetSelected].ssid);
+                    }
+                } else if (key == Qwerty::BKSP) {
+                    if (s_lanPassLen > 0) s_lanPass[--s_lanPassLen] = 0;
+                } else if (key == Qwerty::CLR) {
+                    s_lanPass[0] = 0; s_lanPassLen = 0;
+                } else if (key >= 'A' && key <= 'Z' && s_lanPassLen < 63) {
+                    s_lanPass[s_lanPassLen++] = key + 32;
+                    s_lanPass[s_lanPassLen] = 0;
+                } else if (key == ' ' && s_lanPassLen < 63) {
+                    s_lanPass[s_lanPassLen++] = ' ';
+                    s_lanPass[s_lanPassLen] = 0;
+                } else if (key > 0 && key < 128 && s_lanPassLen < 63) {
+                    s_lanPass[s_lanPassLen++] = key;
+                    s_lanPass[s_lanPassLen] = 0;
+                }
+                return true;
+            }
+            if (s_lanState == LanState::CONNECTING) return true;  // ignore taps while connecting
+            // SCANNING state falls through to normal bottom-bar handling
         }
         // WiChat: fn menu has priority
         if (s_activeTool == ActiveTool::WICHAT && s_wcFnMenuOpen) {
