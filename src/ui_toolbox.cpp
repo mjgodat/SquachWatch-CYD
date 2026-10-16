@@ -721,9 +721,7 @@ static ProbeEntry s_probes[MAX_PROBES];
 static int s_probeCount = 0;
 static bool s_probeActive = false;
 
-static void IRAM_ATTR probeSniffCb(void* buf, wifi_promiscuous_pkt_type_t type) {
-    if (type != WIFI_PKT_MGMT) return;
-    const wifi_promiscuous_pkt_t* pkt = (wifi_promiscuous_pkt_t*)buf;
+static void probeSniffHook(const wifi_promiscuous_pkt_t* pkt, uint16_t rawLen) {
     const uint8_t* frame = pkt->payload;
     int len = pkt->rx_ctrl.sig_len;
     if (len < 28) return;
@@ -772,19 +770,14 @@ static void IRAM_ATTR probeSniffCb(void* buf, wifi_promiscuous_pkt_type_t type) 
 static void probeSniffStart() {
     s_probeCount = 0;
     s_probeActive = true;
-    WiFi.mode(WIFI_STA);
-    WiFi.disconnect();
-    esp_wifi_set_promiscuous(true);
-    esp_wifi_set_promiscuous_rx_cb(probeSniffCb);
-    // Hop channels periodically — done in tick
-    esp_wifi_set_channel(1, WIFI_SECOND_CHAN_NONE);
-    Serial.println("[toolbox] Probe sniff started");
+    wichat_set_capture_hook(probeSniffHook);
+    // Don't pin channel — hop for full coverage
+    Serial.println("[toolbox] Probe sniff started (via hook)");
 }
 
 static void probeSniffStop() {
-    esp_wifi_set_promiscuous(false);
+    wichat_set_capture_hook(nullptr);
     s_probeActive = false;
-    WiFi.mode(WIFI_OFF);
 }
 
 static uint8_t s_probeChan = 1;
@@ -861,9 +854,8 @@ static uint32_t s_karmaBeacons = 0;
 static bool s_karmaActive = false;
 static uint32_t s_karmaLastBeacon = 0;
 
-static void IRAM_ATTR karmaSniffCb(void* buf, wifi_promiscuous_pkt_type_t type) {
-    if (type != WIFI_PKT_MGMT || !s_karmaActive) return;
-    const wifi_promiscuous_pkt_t* pkt = (wifi_promiscuous_pkt_t*)buf;
+static void karmaSniffHook(const wifi_promiscuous_pkt_t* pkt, uint16_t rawLen) {
+    if (!s_karmaActive) return;
     const uint8_t* frame = pkt->payload;
     int len = pkt->rx_ctrl.sig_len;
     if (len < 28 || (frame[0] & 0xFC) != 0x40) return;  // not a probe request
@@ -897,18 +889,13 @@ static void karmaStart() {
     s_karmaBeacons = 0;
     s_karmaActive = true;
     s_karmaLastBeacon = 0;
-    WiFi.mode(WIFI_AP_STA);
-    WiFi.softAP("KarmaAP", NULL, 1, 1);  // hidden AP
-    esp_wifi_set_promiscuous(true);
-    esp_wifi_set_promiscuous_rx_cb(karmaSniffCb);
-    Serial.println("[toolbox] Karma started");
+    wichat_set_capture_hook(karmaSniffHook);
+    Serial.println("[toolbox] Karma started (via hook)");
 }
 
 static void karmaStop() {
     s_karmaActive = false;
-    esp_wifi_set_promiscuous(false);
-    WiFi.softAPdisconnect(true);
-    WiFi.mode(WIFI_OFF);
+    wichat_set_capture_hook(nullptr);
 }
 
 static void karmaTick() {
@@ -2059,9 +2046,8 @@ static void pcapWriteHeader() {
     s_pcapFile.write(hdr, 24);
 }
 
-static void IRAM_ATTR pcapSniffCb(void* buf, wifi_promiscuous_pkt_type_t type) {
+static void pcapSniffHook(const wifi_promiscuous_pkt_t* pkt, uint16_t rawLen) {
     if (!s_pcapOpen) return;
-    const wifi_promiscuous_pkt_t* pkt = (wifi_promiscuous_pkt_t*)buf;
     int len = pkt->rx_ctrl.sig_len;
     if (len <= 0 || len > 2500) return;
 
@@ -2099,22 +2085,17 @@ static void pcapCaptureStart() {
     pcapWriteHeader();
     s_pcapOpen = true;
 
-    WiFi.mode(WIFI_STA);
-    WiFi.disconnect();
-    esp_wifi_set_promiscuous(true);
-    esp_wifi_set_promiscuous_rx_cb(pcapSniffCb);
-    esp_wifi_set_channel(1, WIFI_SECOND_CHAN_NONE);
-    Serial.printf("[toolbox] PCAP capture started: %s\n", fname);
+    wichat_set_capture_hook(pcapSniffHook);
+    Serial.printf("[toolbox] PCAP capture started: %s (via hook)\n", fname);
 }
 
 static void pcapCaptureStop() {
-    esp_wifi_set_promiscuous(false);
+    wichat_set_capture_hook(nullptr);
     if (s_pcapOpen) {
         s_pcapFile.flush();
         s_pcapFile.close();
         s_pcapOpen = false;
     }
-    WiFi.mode(WIFI_OFF);
 }
 
 static uint8_t s_pcapChan = 1;
@@ -2207,9 +2188,7 @@ static fs::File s_hsFile;
 static bool s_hsFileOpen = false;
 static bool s_hsComplete = false;
 
-static void IRAM_ATTR hsSniffCb(void* buf, wifi_promiscuous_pkt_type_t type) {
-    if (type != WIFI_PKT_MGMT && type != WIFI_PKT_DATA) return;
-    const wifi_promiscuous_pkt_t* pkt = (wifi_promiscuous_pkt_t*)buf;
+static void hsSniffHook(const wifi_promiscuous_pkt_t* pkt, uint16_t rawLen) {
     int len = pkt->rx_ctrl.sig_len;
     if (len <= 0 || len > 2500) return;
 
@@ -2220,7 +2199,9 @@ static void IRAM_ATTR hsSniffCb(void* buf, wifi_promiscuous_pkt_type_t type) {
     bool eapol = false;
     int msg = -1;
 
-    if (type == WIFI_PKT_DATA && isItEAPOL(pkt)) {
+    // Check for data frames (type=2 in frame control) that contain EAPOL
+    uint8_t frameType = (pkt->payload[0] & 0x0C) >> 2;
+    if (frameType == 2 && isItEAPOL(pkt)) {
         eapol = true;
         msg = classifyEapolMsg(pkt);
         if (msg >= 1 && msg <= 4) {
@@ -2277,18 +2258,16 @@ static void handshakeCaptureStart(int scanIdx) {
         }
     }
 
-    WiFi.mode(WIFI_STA);
-    WiFi.disconnect();
-    esp_wifi_set_channel(s_hsChan, WIFI_SECOND_CHAN_NONE);
-    esp_wifi_set_promiscuous(true);
-    esp_wifi_set_promiscuous_rx_cb(hsSniffCb);
-    Serial.printf("[handshake] Listening for %s on CH%d\n", s_hsSsid, s_hsChan);
+    // Use the capture hook — don't replace SquatchWatch's promiscuous callback
+    wichat_set_capture_hook(hsSniffHook);
+    wichat_pin_channel(s_hsChan);
+    Serial.printf("[handshake] Listening for %s on CH%d (via hook)\n", s_hsSsid, s_hsChan);
 }
 
 static void handshakeCaptureStop() {
-    esp_wifi_set_promiscuous(false);
+    wichat_set_capture_hook(nullptr);
+    wichat_pin_channel(0);  // resume channel hopping
     if (s_hsFileOpen) { s_hsFile.flush(); s_hsFile.close(); s_hsFileOpen = false; }
-    WiFi.mode(WIFI_OFF);
 }
 
 static void drawHandshakeCapture(TFT_eSPI& t, uint32_t now) {
@@ -3091,9 +3070,8 @@ static void drawPcapViewer(TFT_eSPI& t, uint32_t now) {
 static uint32_t s_wsFrames = 0;
 static bool s_wsActive = false;
 
-static void IRAM_ATTR wsSniffCb(void* buf, wifi_promiscuous_pkt_type_t type) {
+static void wsSniffHook(const wifi_promiscuous_pkt_t* pkt, uint16_t rawLen) {
     if (!s_wsActive) return;
-    const wifi_promiscuous_pkt_t* pkt = (wifi_promiscuous_pkt_t*)buf;
     int len = pkt->rx_ctrl.sig_len;
     if (len <= 0 || len > 2500) return;
 
@@ -3118,18 +3096,13 @@ static void usbWiresharkStart() {
                         0,0,0,0, 0,0,0,0, 0xFF,0xFF,0x00,0x00, 0x69,0x00,0x00,0x00};
     Serial.write(hdr, 24);
 
-    WiFi.mode(WIFI_STA);
-    WiFi.disconnect();
-    esp_wifi_set_promiscuous(true);
-    esp_wifi_set_promiscuous_rx_cb(wsSniffCb);
-    esp_wifi_set_channel(1, WIFI_SECOND_CHAN_NONE);
-    Serial.println("[wireshark] Streaming PCAP over USB — pipe to Wireshark");
+    wichat_set_capture_hook(wsSniffHook);
+    Serial.println("[wireshark] Streaming PCAP over USB (via hook)");
 }
 
 static void usbWiresharkStop() {
     s_wsActive = false;
-    esp_wifi_set_promiscuous(false);
-    WiFi.mode(WIFI_OFF);
+    wichat_set_capture_hook(nullptr);
 }
 
 static uint8_t s_wsChan = 1;

@@ -803,6 +803,8 @@ bool DetectionEngine::init() {
         const wifi_promiscuous_pkt_t* pkt = (const wifi_promiscuous_pkt_t*)buf;
         // WiChat hook — check every frame for WiChat BSSID
         { auto h = wichat_get_rx_hook(); if (h) h(pkt, pkt->rx_ctrl.sig_len); }
+        // Capture hook — handshake/pcap tools see ALL frames
+        { auto h = wichat_get_capture_hook(); if (h) h(pkt, pkt->rx_ctrl.sig_len); }
         if (!g_engine) return;
         {
             const uint8_t ch = pkt->rx_ctrl.channel;

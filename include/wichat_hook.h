@@ -22,6 +22,10 @@ wichat_rx_hook_t wichat_get_rx_hook(void);
 void wichat_pin_channel(uint8_t ch);
 uint8_t wichat_pinned_channel(void);
 
+// Second hook for handshake/pcap capture tools
+void wichat_set_capture_hook(wichat_rx_hook_t hook);
+wichat_rx_hook_t wichat_get_capture_hook(void);
+
 // Called to send a WiChat frame — briefly takes the radio
 // Returns 0 on success.
 int wichat_send_frame(const uint8_t* data, size_t len);
