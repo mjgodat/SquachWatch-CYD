@@ -90,8 +90,11 @@ batch|end|sleep|echo
 - **Tap bottom bar** to stop any running tool
 - All tools share the radio cooperatively via hook system — detection keeps running
 
-## Hardware
-Built for the **Freenove ESP32-S3 3.5" Capacitive Touch Display (FNK0104N)**:
+## Hardware & Test Platform
+
+**Tested on:** Freenove ESP32-S3 3.5" Capacitive Touch Display (FNK0104N) only. Other boards may work but have not been tested with the toolbox. The base SquatchWatch firmware supports many boards — see the [upstream repo](https://github.com/skizzophrenic/SquachWatch-CYD) for full hardware compatibility.
+
+**Primary board specs (FNK0104N):**
 - ESP32-S3 with 16MB Flash, 8MB PSRAM
 - ST77922 320x480 QSPI display
 - Capacitive touch (I2C, integrated in display)
