@@ -1820,16 +1820,19 @@ static void drawHaystack(TFT_eSPI& t, uint32_t now) {
 // =============================================================================
 //  BADUSB — Ducky Script from SD card
 // =============================================================================
-// USB HID — re-enabled for BadUSB/USB Keyboard/USB Recon tools
-// Note: HID init causes USB re-enumeration (Windows ding sound)
-// Research pending for clean composite device initialization
+// USB HID — global declaration registers HID descriptor before USB.begin()
+// This creates a stable CDC+HID composite device with NO re-enumeration
 #include <USB.h>
 #include <USBHIDKeyboard.h>
+static USBHIDKeyboard s_globalKb;  // GLOBAL — constructor registers HID before app_main
 // #define USB_HID_DISABLED 1
 
 #ifdef USB_HID_DISABLED
 // USB HID disabled — stub everything out
 static void* s_usbKb = nullptr;
+#elif 1
+// Use the global keyboard — already registered at boot
+static USBHIDKeyboard* s_usbKb = &s_globalKb;
 #define KEY_RETURN 0
 #define KEY_TAB 0
 #define KEY_ESC 0
@@ -1901,10 +1904,8 @@ static void badUsbStart() {
     }
 
     // Init USB HID keyboard
-    if (!s_usbKb) {
-        s_usbKb = new USBHIDKeyboard();
-        s_usbKb->begin();
-    }
+    // Global keyboard already registered at boot — just ensure begin() called
+    if (s_usbKb) s_usbKb->begin();
 
     // Count lines
     fs::File f = SD_MMC.open(s_duckyFile);
@@ -2002,10 +2003,8 @@ static void drawBadUsb(TFT_eSPI& t, uint32_t now) {
 //  USB KEYBOARD — live keystroke entry via USB HID
 // =============================================================================
 static void usbKeyboardStart() {
-    if (!s_usbKb) {
-        s_usbKb = new USBHIDKeyboard();
-        s_usbKb->begin();
-    }
+    // Global keyboard already registered at boot — just ensure begin() called
+    if (s_usbKb) s_usbKb->begin();
     Serial.println("[toolbox] USB keyboard mode active");
 }
 
