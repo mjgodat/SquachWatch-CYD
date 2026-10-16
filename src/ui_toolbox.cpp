@@ -1821,12 +1821,15 @@ static void drawHaystack(TFT_eSPI& t, uint32_t now) {
 // =============================================================================
 //  BADUSB — Ducky Script from SD card
 // =============================================================================
-// USB HID — global declaration registers HID descriptor before USB.begin()
-// This creates a stable CDC+HID composite device with NO re-enumeration
+// USB HID — only on ESP32-S3 (has native USB)
+#if defined(CONFIG_IDF_TARGET_ESP32S3)
 #include <USB.h>
 #include <USBHIDKeyboard.h>
-USBHIDKeyboard s_globalKb;  // GLOBAL — constructor registers HID before app_main
-// #define USB_HID_DISABLED 1
+USBHIDKeyboard s_globalKb;
+__attribute__((constructor)) static void _initGlobalKb() { s_globalKb.begin(); }
+#else
+#define USB_HID_DISABLED 1
+#endif
 
 // Payload state — always available regardless of HID
 static PayloadOS s_payloadOS = PayloadOS::WINDOWS;
@@ -1856,8 +1859,9 @@ static int s_duckyLine = 0;
 static int s_duckyTotal = 0;
 
 #ifdef USB_HID_DISABLED
-static void badUsbStart() { Serial.println("[toolbox] USB HID disabled in this build"); }
-static void usbKeyboardStart() { Serial.println("[toolbox] USB HID disabled in this build"); }
+static void badUsbStart() { Serial.println("[toolbox] USB HID disabled — ESP32 has no native USB"); }
+static void usbKeyboardStart() { Serial.println("[toolbox] USB HID disabled"); }
+static void executePayload(const char*) { Serial.println("[toolbox] USB HID disabled"); }
 static void drawBadUsb(TFT_eSPI& t, uint32_t now) {
     t.setTextColor(Theme::RED, Theme::BG); t.setTextDatum(MC_DATUM);
     t.drawString("USB HID DISABLED", t.width()/2, t.height()/2, 4);
@@ -3148,7 +3152,7 @@ static void bleEnumerateStart(int bleIdx) {
     if (scan && scan->isScanning()) scan->stop();
 
     Serial.printf("[toolbox] Connecting to %s for GATT enum...\n", s_enumAddr);
-
+#if !defined(CONFIG_BT_NIMBLE_ROLE_CENTRAL_DISABLED)
     NimBLEClient* client = NimBLEDevice::createClient();
     NimBLEAddress addr(std::string(s_enumAddr), 1);
     if (client && client->connect(addr)) {
@@ -3168,6 +3172,9 @@ static void bleEnumerateStart(int bleIdx) {
         Serial.println("[toolbox] GATT connect failed");
     }
     NimBLEDevice::deleteClient(client);
+#else
+    Serial.println("[toolbox] BLE central role disabled in this build");
+#endif
     s_enumDone = true;
 }
 

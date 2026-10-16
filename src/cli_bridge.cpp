@@ -101,28 +101,25 @@ static void cb_chat_status() {
 }
 
 // ---- HID callbacks ----
+#if defined(CONFIG_IDF_TARGET_ESP32S3)
 #include <USB.h>
 #include <USBHIDKeyboard.h>
 extern USBHIDKeyboard s_globalKb;
-
-static void cb_hid_run() {
-    Serial.println("[OK] Use 'hid payload <os> <name>' for built-in payloads");
-}
-
+static void cb_hid_run() { Serial.println("[OK] Use 'hid payload <os> <name>'"); }
 static void cb_hid_type(const char *text) {
-    s_globalKb.begin();
-    delay(100);
-    s_globalKb.print(text);
+    s_globalKb.begin(); delay(100); s_globalKb.print(text);
     Serial.printf("[OK] Typed: %s\n", text);
 }
-
 static void cb_hid_key(uint8_t keycode) {
-    s_globalKb.begin();
-    s_globalKb.press(keycode);
-    delay(30);
+    s_globalKb.begin(); s_globalKb.press(keycode); delay(30);
     s_globalKb.releaseAll();
     Serial.printf("[OK] Key sent: 0x%02X\n", keycode);
 }
+#else
+static void cb_hid_run() { Serial.println("[ERR] USB HID not available on this chip"); }
+static void cb_hid_type(const char *) { Serial.println("[ERR] USB HID not available"); }
+static void cb_hid_key(uint8_t) { Serial.println("[ERR] USB HID not available"); }
+#endif
 
 // ---- System callbacks ----
 static void cb_set_brightness(int level) {
