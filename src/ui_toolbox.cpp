@@ -9,8 +9,8 @@
 #include <NimBLEDevice.h>
 #include <WebServer.h>
 
-// Bruce modules (attack logic from Bruce firmware)
-#include "ble/ble_spam.h"
+// Bruce BLE spam module compiled but not called from toolbox
+// (toolbox has its own BLE spam implementations)
 
 // WiChat mesh chat
 #include "mesh.h"
@@ -906,7 +906,7 @@ static void karmaTick() {
     s_karmaLastBeacon = now;
 
     // Broadcast beacons for all captured SSIDs
-    int idx = s_karmaBeacons % s_karmaCount;
+    int idx = s_karmaBeacons % (s_karmaCount ? s_karmaCount : 1);
     const char* ssid = s_karmaSSIDs[idx];
     size_t ssidLen = strlen(ssid);
 
@@ -948,7 +948,7 @@ static void drawKarma(TFT_eSPI& t, uint32_t now) {
     for (int i = 0; i < min(s_karmaCount, 8); i++) {
         int drawIdx = i - s_toolScroll;
         if (drawIdx < 0 || drawIdx >= 8) continue;
-        bool active = ((int)(s_karmaBeacons % s_karmaCount) == i);
+        bool active = ((int)(s_karmaBeacons % (s_karmaCount ? s_karmaCount : 1)) == i);
         t.setTextColor(active ? Theme::VAPOR_YELLOW : Theme::CYAN, Theme::BG);
         t.drawString(s_karmaSSIDs[i], 12, listY + drawIdx * 20, 2);
     }
@@ -1760,24 +1760,19 @@ static void haystackTick() {
     s_haystackLastMs = now;
     s_pAdv->stop();
 
-    uint8_t mfgData[29];
-    mfgData[0] = 0x4C; mfgData[1] = 0x00;
-    mfgData[2] = 0x12; mfgData[3] = 0x19;
-    mfgData[4] = 0x10;
-    memcpy(mfgData + 5, s_haystackKey, 24);  // first 24 bytes of key
+    // OpenHaystack FindMy beacon: all 28 key bytes in manufacturer data
+    // Note: full OpenHaystack protocol also encodes key bits in the BLE
+    // address, but NimBLE doesn't expose address control. This simplified
+    // version puts the full key in the payload for tracking via custom tools.
+    uint8_t mfgData[33];
+    mfgData[0] = 0x4C; mfgData[1] = 0x00;  // Apple
+    mfgData[2] = 0x12; mfgData[3] = 0x19;  // FindMy
+    mfgData[4] = 0x10;                       // status
+    memcpy(mfgData + 5, s_haystackKey, 28);  // full 28-byte key
 
     NimBLEAdvertisementData advData;
     advData.setFlags(0x06);
-    advData.setManufacturerData(std::string((char*)mfgData, 29));
-
-    // Set the remaining key bytes in the BLE address
-    uint8_t addr[6];
-    addr[0] = s_haystackKey[24] | 0xC0;  // random static address
-    addr[1] = s_haystackKey[25];
-    addr[2] = s_haystackKey[26];
-    addr[3] = s_haystackKey[27];
-    addr[4] = (uint8_t)(s_haystackCount & 0xFF);
-    addr[5] = (uint8_t)((s_haystackCount >> 8) & 0xFF);
+    advData.setManufacturerData(std::string((char*)mfgData, 33));
 
     s_pAdv->setAdvertisementData(advData);
     s_pAdv->start();
@@ -2050,30 +2045,46 @@ static void pcapWriteHeader() {
     s_pcapFile.write(hdr, 24);
 }
 
+// Queue for PCAP/handshake — write SD from main loop, not from hook
+struct CaptureFrame {
+    uint8_t data[300];  // truncated frame
+    uint16_t len;
+    uint32_t ts_ms;
+};
+static QueueHandle_t s_captureQueue = nullptr;
+
 static void pcapSniffHook(const wifi_promiscuous_pkt_t* pkt, uint16_t rawLen) {
-    if (!s_pcapOpen) return;
+    if (!s_pcapOpen || !s_captureQueue) return;
     int len = pkt->rx_ctrl.sig_len;
-    if (len <= 0 || len > 2500) return;
-
-    uint32_t ts_sec = millis() / 1000;
-    uint32_t ts_usec = (millis() % 1000) * 1000;
-    uint32_t incl_len = len;
-    uint32_t orig_len = len;
-
-    // PCAP packet header (16 bytes)
-    uint8_t phdr[16];
-    memcpy(phdr, &ts_sec, 4);
-    memcpy(phdr + 4, &ts_usec, 4);
-    memcpy(phdr + 8, &incl_len, 4);
-    memcpy(phdr + 12, &orig_len, 4);
-    s_pcapFile.write(phdr, 16);
-    s_pcapFile.write(pkt->payload, len);
+    if (len <= 0 || len > 300) return;
+    CaptureFrame f;
+    f.len = len;
+    f.ts_ms = millis();
+    memcpy(f.data, pkt->payload, len);
+    xQueueSendFromISR(s_captureQueue, &f, NULL);
     s_pcapFrames++;
+}
+
+// Call from main loop to drain capture queue and write to SD
+static void pcapFlushQueue() {
+    if (!s_pcapOpen || !s_captureQueue) return;
+    CaptureFrame f;
+    while (xQueueReceive(s_captureQueue, &f, 0) == pdTRUE) {
+        uint32_t ts_sec = f.ts_ms / 1000;
+        uint32_t ts_usec = (f.ts_ms % 1000) * 1000;
+        uint32_t incl = f.len, orig = f.len;
+        uint8_t phdr[16];
+        memcpy(phdr, &ts_sec, 4); memcpy(phdr+4, &ts_usec, 4);
+        memcpy(phdr+8, &incl, 4); memcpy(phdr+12, &orig, 4);
+        s_pcapFile.write(phdr, 16);
+        s_pcapFile.write(f.data, f.len);
+    }
 }
 
 static void pcapCaptureStart() {
     s_pcapFrames = 0;
     s_pcapOpen = false;
+    if (!s_captureQueue) s_captureQueue = xQueueCreate(16, sizeof(CaptureFrame));
     SD_MMC.setPins(5, 4, 6, 7, 2, 3);
     if (!SD_MMC.begin("/sd", false, false)) {
         Serial.println("[toolbox] SD mount failed for PCAP");
@@ -2108,6 +2119,9 @@ static uint32_t s_pcapHopMs = 0;
 static void drawPcapCapture(TFT_eSPI& t, uint32_t now) {
     const int w = t.width();
     const int h = t.height();
+
+    // Flush queued frames to SD from main loop
+    pcapFlushQueue();
 
     // Hop channels
     if (now - s_pcapHopMs > 500) {
@@ -2205,34 +2219,46 @@ static void hsSniffHook(const wifi_promiscuous_pkt_t* pkt, uint16_t rawLen) {
     if (!matchesBssid(pkt, s_hsBssid)) return;
     s_hsBssidMatch++;
 
-    bool isBeacon = (pkt->payload[0] & 0xFC) == 0x80;
+    uint8_t fc0 = pkt->payload[0];
+    uint8_t frameType = (fc0 & 0x0C) >> 2;    // 0=mgmt, 1=ctrl, 2=data
+    uint8_t frameSubtype = (fc0 & 0xF0) >> 4;
+    bool isBeacon = (frameType == 0 && frameSubtype == 8);
+
+    // Count ALL frame types from target (not gated by SD)
+    if (isBeacon) s_hsBeacons++;
+    if (frameType == 2) {
+        s_hsDataFrames++;
+        bool isProtected = (pkt->payload[1] & 0x40) != 0;
+        // Log EVERY unencrypted data frame — EAPOL must be unencrypted
+        if (!isProtected && len > 36) {
+            Serial.printf("[hs-UNENC] fc=%02X%02X len=%d bytes[24..39]: ",
+                fc0, pkt->payload[1], len);
+            for (int i = 24; i < 40 && i < len; i++)
+                Serial.printf("%02X ", pkt->payload[i]);
+            Serial.println();
+        }
+    }
+
+    // Check data frames for EAPOL
     bool eapol = false;
     int msg = -1;
-
-    // Check for data frames (type=2 in frame control) that contain EAPOL
-    uint8_t frameType = (pkt->payload[0] & 0x0C) >> 2;
-    if (frameType == 2) s_hsDataFrames++;
     if (frameType == 2 && isItEAPOL(pkt)) {
         eapol = true;
         msg = classifyEapolMsg(pkt);
         if (msg >= 1 && msg <= 4) {
             s_hsMsg[msg] = true;
             s_hsEapolCount++;
-            Serial.printf("[handshake] EAPOL M%d captured\n", msg);
+            Serial.printf("[handshake] EAPOL M%d captured!\n", msg);
         }
     }
 
-    // Write to PCAP if it's a beacon or EAPOL frame
-    if (s_hsFileOpen && (isBeacon || eapol)) {
-        uint32_t ts_sec = millis() / 1000;
-        uint32_t ts_usec = (millis() % 1000) * 1000;
-        uint32_t incl = len, orig = len;
-        uint8_t phdr[16];
-        memcpy(phdr, &ts_sec, 4); memcpy(phdr+4, &ts_usec, 4);
-        memcpy(phdr+8, &incl, 4); memcpy(phdr+12, &orig, 4);
-        s_hsFile.write(phdr, 16);
-        s_hsFile.write(pkt->payload, len);
-        if (isBeacon) s_hsBeacons++;
+    // Queue beacon/EAPOL frames for SD write from main loop
+    if (s_hsFileOpen && s_captureQueue && (isBeacon || eapol) && len <= 300) {
+        CaptureFrame f;
+        f.len = len;
+        f.ts_ms = millis();
+        memcpy(f.data, pkt->payload, len);
+        xQueueSendFromISR(s_captureQueue, &f, NULL);
     }
 
     // Check if complete handshake captured
@@ -2251,14 +2277,19 @@ static void handshakeCaptureStart(int scanIdx) {
     s_hsBeacons = 0;
     s_hsComplete = false;
     s_hsFileOpen = false;
+    s_hsHookCalls = 0; s_hsBssidMatch = 0; s_hsDataFrames = 0;
+    if (!s_captureQueue) s_captureQueue = xQueueCreate(16, sizeof(CaptureFrame));
 
     // Open PCAP file on SD
     SD_MMC.setPins(5, 4, 6, 7, 2, 3);
     if (SD_MMC.begin("/sd", false, false)) {
-        char fname[48];
-        snprintf(fname, sizeof fname, "/hs_%s_%lu.pcap", s_hsSsid, millis());
-        // sanitize filename
-        for (char* p = fname + 4; *p; p++) { if (*p == ' ' || *p == '/') *p = '_'; }
+        char fname[64];
+        char safeSsid[16];  // truncate SSID to prevent overflow
+        strncpy(safeSsid, s_hsSsid, 15); safeSsid[15] = 0;
+        snprintf(fname, sizeof fname, "/hs_%s_%lu.pcap", safeSsid, millis());
+        for (char* p = fname + 1; *p; p++) {
+            if (*p == ' ' || *p == '/' || *p == '\\' || *p == '.') *p = '_';
+        }
         s_hsFile = SD_MMC.open(fname, FILE_WRITE);
         if (s_hsFile) {
             uint8_t hdr[24] = {0xD4,0xC3,0xB2,0xA1, 0x02,0x00,0x04,0x00,
@@ -2289,6 +2320,9 @@ static void handshakeCaptureStop() {
 static void drawHandshakeCapture(TFT_eSPI& t, uint32_t now) {
     const int w = t.width();
     const int h = t.height();
+
+    // Flush queued frames to SD from main loop
+    if (s_hsFileOpen) pcapFlushQueue();
 
     t.setTextColor(Theme::RED, Theme::BG);
     t.setTextDatum(MC_DATUM);
@@ -3095,26 +3129,23 @@ static void drawPcapViewer(TFT_eSPI& t, uint32_t now) {
 static uint32_t s_wsFrames = 0;
 static bool s_wsActive = false;
 
+// Wireshark uses the same capture queue, flushed to Serial in draw
 static void wsSniffHook(const wifi_promiscuous_pkt_t* pkt, uint16_t rawLen) {
-    if (!s_wsActive) return;
+    if (!s_wsActive || !s_captureQueue) return;
     int len = pkt->rx_ctrl.sig_len;
-    if (len <= 0 || len > 2500) return;
-
-    // Write PCAP packet header + payload over serial
-    uint32_t ts_sec = millis() / 1000;
-    uint32_t ts_usec = (millis() % 1000) * 1000;
-    uint32_t incl = len, orig = len;
-    Serial.write((uint8_t*)&ts_sec, 4);
-    Serial.write((uint8_t*)&ts_usec, 4);
-    Serial.write((uint8_t*)&incl, 4);
-    Serial.write((uint8_t*)&orig, 4);
-    Serial.write(pkt->payload, len);
+    if (len <= 0 || len > 300) return;
+    CaptureFrame f;
+    f.len = len;
+    f.ts_ms = millis();
+    memcpy(f.data, pkt->payload, len);
+    xQueueSendFromISR(s_captureQueue, &f, NULL);
     s_wsFrames++;
 }
 
 static void usbWiresharkStart() {
     s_wsFrames = 0;
     s_wsActive = true;
+    if (!s_captureQueue) s_captureQueue = xQueueCreate(16, sizeof(CaptureFrame));
 
     // Write PCAP global header over serial first
     uint8_t hdr[24] = {0xD4,0xC3,0xB2,0xA1, 0x02,0x00,0x04,0x00,
@@ -3122,7 +3153,7 @@ static void usbWiresharkStart() {
     Serial.write(hdr, 24);
 
     wichat_set_capture_hook(wsSniffHook);
-    Serial.println("[wireshark] Streaming PCAP over USB (via hook)");
+    // Don't print text — Serial carries binary PCAP data
 }
 
 static void usbWiresharkStop() {
@@ -3136,6 +3167,21 @@ static uint32_t s_wsHopMs = 0;
 static void drawUsbWireshark(TFT_eSPI& t, uint32_t now) {
     const int w = t.width();
     const int h = t.height();
+
+    // Flush queued frames to Serial as PCAP
+    if (s_captureQueue) {
+        CaptureFrame f;
+        while (xQueueReceive(s_captureQueue, &f, 0) == pdTRUE) {
+            uint32_t ts_sec = f.ts_ms / 1000;
+            uint32_t ts_usec = (f.ts_ms % 1000) * 1000;
+            uint32_t incl = f.len, orig = f.len;
+            Serial.write((uint8_t*)&ts_sec, 4);
+            Serial.write((uint8_t*)&ts_usec, 4);
+            Serial.write((uint8_t*)&incl, 4);
+            Serial.write((uint8_t*)&orig, 4);
+            Serial.write(f.data, f.len);
+        }
+    }
 
     // Channel hop
     if (now - s_wsHopMs > 500) {

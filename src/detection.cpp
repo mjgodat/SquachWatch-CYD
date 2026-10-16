@@ -796,7 +796,7 @@ bool DetectionEngine::init() {
     }
 #endif
     wifi_promiscuous_filter_t filter;
-    filter.filter_mask = WIFI_PROMIS_FILTER_MASK_MGMT | WIFI_PROMIS_FILTER_MASK_DATA;
+    filter.filter_mask = WIFI_PROMIS_FILTER_MASK_ALL;  // pass everything — capture tools need EAPOL
     esp_wifi_set_promiscuous_filter(&filter);
     esp_wifi_set_promiscuous_rx_cb([](void* buf, wifi_promiscuous_pkt_type_t) {
         s_wifiRaw++;
