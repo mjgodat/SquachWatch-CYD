@@ -9,8 +9,8 @@
 #include <NimBLEDevice.h>
 #include <WebServer.h>
 
-// Bruce BLE spam module compiled but not called from toolbox
-// (toolbox has its own BLE spam implementations)
+// BadUSB payload library
+#include "badusb_payloads.h"
 
 // WiChat mesh chat
 #include "mesh.h"
@@ -75,9 +75,10 @@ static const int BLE_CTX_COUNT = 3;
 static int s_bleSelected = -1;
 
 // ---- Layout ----
-// Forward declarations for keyboard (defined in WiChat section)
+// Forward declarations
 static void wcKbDraw(TFT_eSPI& t, int w, int h);
 static char wcKbTap(int16_t x, int16_t y, int w, int h);
+static void drawRow(TFT_eSPI& t, int x, int y, int w, const char* label, bool highlight);
 
 static const int ROW_H     = 42;
 static const int ROW_PAD   = 6;
@@ -1827,6 +1828,12 @@ static void drawHaystack(TFT_eSPI& t, uint32_t now) {
 static USBHIDKeyboard s_globalKb;  // GLOBAL — constructor registers HID before app_main
 // #define USB_HID_DISABLED 1
 
+// Payload state — always available regardless of HID
+static PayloadOS s_payloadOS = PayloadOS::WINDOWS;
+static int s_payloadIdx = -1;
+static bool s_payloadRunning = false;
+static bool s_payloadPickOS = true;
+
 #ifdef USB_HID_DISABLED
 // USB HID disabled — stub everything out
 static void* s_usbKb = nullptr;
@@ -1868,6 +1875,9 @@ static void drawBadUsb(TFT_eSPI& t, uint32_t now) {
 static void drawUsbKeyboard(TFT_eSPI& t, uint32_t now) { drawBadUsb(t, now); }
 #else
 static void badUsbStart() {
+    s_payloadPickOS = true;
+    s_payloadRunning = false;
+    s_payloadIdx = -1;
     s_usbRunning = false;
     s_duckyLine = 0;
     s_duckyTotal = 0;
@@ -1974,29 +1984,113 @@ static void drawBadUsb(TFT_eSPI& t, uint32_t now) {
     const int w = t.width();
     const int h = t.height();
 
-    t.setTextColor(Theme::RED, Theme::BG);
-    t.setTextDatum(MC_DATUM);
-    t.drawString("BAD USB", w / 2, HEADER_H + 20, 4);
-
-    if (s_duckyFile.length() > 0) {
-        t.setTextColor(Theme::CYAN, Theme::BG);
-        t.drawString(s_duckyFile, w / 2, HEADER_H + 55, 2);
-
-        char buf[32];
-        snprintf(buf, sizeof buf, "Line %d / %d", s_duckyLine, s_duckyTotal);
-        t.setTextColor(s_usbRunning ? Theme::GREEN : Theme::AMBER, Theme::BG);
-        t.drawString(buf, w / 2, h / 2, 4);
-        t.drawString(s_usbRunning ? "EXECUTING..." : "COMPLETE", w / 2, h / 2 + 35, 2);
-    } else {
+    if (s_payloadRunning) {
+        t.setTextColor(Theme::RED, Theme::BG);
+        t.setTextDatum(MC_DATUM);
+        t.drawString("EXECUTING PAYLOAD", w / 2, h / 2 - 20, 4);
+        t.setTextColor(Theme::GREEN, Theme::BG);
+        t.drawString(PAYLOAD_OS_NAMES[(int)s_payloadOS], w / 2, h / 2 + 15, 2);
+        if (s_payloadIdx >= 0) t.drawString(PAYLOAD_NAMES[s_payloadIdx], w / 2, h / 2 + 35, 2);
+    } else if (s_payloadPickOS) {
+        // Pick OS
+        t.setTextColor(Theme::RED, Theme::BG);
+        t.setTextDatum(MC_DATUM);
+        t.drawString("BAD USB", w / 2, HEADER_H + 10, 4);
         t.setTextColor(Theme::AMBER, Theme::BG);
-        t.drawString("No .txt or .ducky files", w / 2, h / 2 - 10, 2);
-        t.drawString("found on SD card", w / 2, h / 2 + 10, 2);
-        t.drawString("Place scripts in /badusb/", w / 2, h / 2 + 35, 2);
+        t.drawString("SELECT TARGET OS", w / 2, HEADER_H + 38, 2);
+
+        int listTop = HEADER_H + 55;
+        for (int i = 0; i < (int)PayloadOS::COUNT + 1; i++) {
+            int y = listTop + i * (ROW_H + ROW_PAD);
+            if (i < (int)PayloadOS::COUNT) {
+                drawRow(t, ROW_PAD, y, w - ROW_PAD * 2, PAYLOAD_OS_NAMES[i], false);
+            } else {
+                t.fillRoundRect(ROW_PAD, y, w - ROW_PAD * 2, ROW_H - 4, 6, Theme::BG);
+                t.setTextColor(Theme::AMBER, Theme::BG);
+                t.setTextDatum(ML_DATUM);
+                t.drawString("< BACK", ROW_PAD + 14, y + ROW_H / 2 - 2, 2);
+            }
+        }
+    } else {
+        // Pick payload
+        t.setTextColor(Theme::RED, Theme::BG);
+        t.setTextDatum(MC_DATUM);
+        char title[32];
+        snprintf(title, sizeof title, "PAYLOADS (%s)", PAYLOAD_OS_NAMES[(int)s_payloadOS]);
+        t.drawString(title, w / 2, HEADER_H + 10, 2);
+
+        int listTop = HEADER_H + 30;
+        int visible = (h - listTop - 28) / (ROW_H + ROW_PAD);
+        for (int i = 0; i < (int)PayloadType::COUNT; i++) {
+            int drawIdx = i - s_toolScroll;
+            if (drawIdx < 0 || drawIdx >= visible) continue;
+            int y = listTop + drawIdx * (ROW_H + ROW_PAD);
+            bool isBack = (i == (int)PayloadType::BACK);
+            if (isBack) {
+                t.fillRoundRect(ROW_PAD, y, w - ROW_PAD * 2, ROW_H - 4, 6, Theme::BG);
+                t.setTextColor(Theme::AMBER, Theme::BG);
+                t.setTextDatum(ML_DATUM);
+                t.drawString("< BACK", ROW_PAD + 14, y + ROW_H / 2 - 2, 2);
+            } else {
+                drawRow(t, ROW_PAD, y, w - ROW_PAD * 2, PAYLOAD_NAMES[i], false);
+            }
+        }
     }
 
     t.fillRect(0, h - 24, w, 24, Theme::TASKBAR);
     t.setTextColor(Theme::AMBER, Theme::TASKBAR);
+    t.setTextDatum(MC_DATUM);
     t.drawString("TAP TO STOP", w / 2, h - 12, 2);
+}
+
+// =============================================================================
+//  PAYLOAD EXECUTOR — runs built-in BadUSB payloads via HID
+// =============================================================================
+// (payload state declared above the #ifdef block)
+
+static void executePayload(const char* script) {
+    if (!s_usbKb || !script) return;
+    s_usbKb->begin();
+    delay(300);
+    s_payloadRunning = true;
+
+    const char* p = script;
+    while (*p && s_payloadRunning) {
+        // Find end of line
+        const char* eol = strchr(p, '\n');
+        int lineLen = eol ? (eol - p) : strlen(p);
+        char line[256];
+        if (lineLen >= (int)sizeof(line)) lineLen = sizeof(line) - 1;
+        memcpy(line, p, lineLen);
+        line[lineLen] = 0;
+
+        if (strncmp(line, "CMD:", 4) == 0) {
+            s_usbKb->print(line + 4);
+        } else if (strncmp(line, "DELAY:", 6) == 0) {
+            delay(atoi(line + 6));
+        } else if (strncmp(line, "GUI:", 4) == 0) {
+            s_usbKb->press(KEY_LEFT_GUI);
+            if (strcmp(line + 4, "r") == 0) s_usbKb->press('r');
+            else if (strcmp(line + 4, "SPACE") == 0) s_usbKb->press(' ');
+            delay(50);
+            s_usbKb->releaseAll();
+        } else if (strncmp(line, "CTRL:ALT:", 9) == 0) {
+            s_usbKb->press(KEY_LEFT_CTRL);
+            s_usbKb->press(KEY_LEFT_ALT);
+            s_usbKb->press(line[9]);
+            delay(50);
+            s_usbKb->releaseAll();
+        } else if (strcmp(line, "ENTER") == 0) {
+            s_usbKb->press(KEY_RETURN);
+            delay(30);
+            s_usbKb->releaseAll();
+        }
+        delay(20);
+
+        p = eol ? eol + 1 : p + lineLen;
+    }
+    s_usbKb->releaseAll();
+    s_payloadRunning = false;
 }
 
 // =============================================================================
@@ -4285,6 +4379,40 @@ bool uiToolboxHandleTap(TFT_eSPI& t, int16_t x, int16_t y, uint32_t now) {
             }
             return true;
         }
+        // BadUSB: payload OS/type selection
+        if (s_activeTool == ActiveTool::BADUSB_DUCKY && !s_payloadRunning) {
+            if (tapBottom) {
+                stopActiveTool();
+                s_level = ToolboxLevel::CATEGORIES;
+                s_scroll = 0;
+                return true;
+            }
+            int menuTop = s_payloadPickOS ? (HEADER_H + 55) : (HEADER_H + 30);
+            int row = (y - menuTop) / (ROW_H + ROW_PAD) + s_toolScroll;
+
+            if (s_payloadPickOS) {
+                if (row >= 0 && row < (int)PayloadOS::COUNT) {
+                    s_payloadOS = (PayloadOS)row;
+                    s_payloadPickOS = false;
+                    s_toolScroll = 0;
+                } else {
+                    // BACK
+                    stopActiveTool();
+                    s_level = ToolboxLevel::USB_TOOLS;
+                    s_scroll = 0;
+                }
+            } else {
+                if (row >= 0 && row < (int)PayloadType::BACK) {
+                    s_payloadIdx = row;
+                    const char* script = PAYLOAD_TABLE[(int)s_payloadOS][row];
+                    executePayload(script);
+                } else {
+                    s_payloadPickOS = true;
+                    s_toolScroll = 0;
+                }
+            }
+            return true;
+        }
         // WiFi LAN Scanner: handle network selection and password entry
         if (s_activeTool == ActiveTool::WIFI_NET_SCAN) {
             if (s_lanState == LanState::PICK_NETWORK) {
@@ -4328,7 +4456,15 @@ bool uiToolboxHandleTap(TFT_eSPI& t, int16_t x, int16_t y, uint32_t now) {
                 }
                 return true;
             }
-            if (s_lanState == LanState::CONNECTING) return true;  // ignore taps while connecting
+            if (s_lanState == LanState::CONNECTING) {
+                if (tapBottom) {  // allow exit even while connecting
+                    WiFi.disconnect();
+                    stopActiveTool();
+                    s_level = ToolboxLevel::CATEGORIES;
+                    s_scroll = 0;
+                }
+                return true;
+            }
             // SCANNING state falls through to normal bottom-bar handling
         }
         // WiChat: fn menu has priority
