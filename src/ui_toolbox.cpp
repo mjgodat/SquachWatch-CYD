@@ -2158,27 +2158,31 @@ static void drawPcapCapture(TFT_eSPI& t, uint32_t now) {
 // =============================================================================
 //  HANDSHAKE/PMKID CAPTURE — from Bruce's sniffer.cpp EAPOL logic
 // =============================================================================
-// EAPOL detection — ported from Bruce firmware modules/wifi/sniffer.cpp
+// EAPOL detection — using Marauder's proven offset approach
+// Checks for EtherType 0x888E at offsets 30-31 (non-QoS) and 32-33 (QoS)
 static bool isItEAPOL(const wifi_promiscuous_pkt_t *pkt) {
     const uint8_t *p = pkt->payload;
     int len = pkt->rx_ctrl.sig_len;
-    if (len < 36) return false;
-    // LLC/SNAP: AA-AA-03-00-00-00-88-8E = EAPOL
-    if (p[24]==0xAA && p[25]==0xAA && p[26]==0x03 && p[27]==0x00 &&
-        p[28]==0x00 && p[29]==0x00 && p[30]==0x88 && p[31]==0x8E) return true;
-    // QoS data shifts LLC/SNAP by 2
-    if ((p[0] & 0x0F) == 0x08) {
-        if (p[26]==0xAA && p[27]==0xAA && p[28]==0x03 && p[29]==0x00 &&
-            p[30]==0x00 && p[31]==0x00 && p[32]==0x88 && p[33]==0x8E) return true;
-    }
+    if (len < 34) return false;
+    // Non-QoS data: EtherType at offset 30-31
+    if (p[30] == 0x88 && p[31] == 0x8E) return true;
+    // QoS data: EtherType at offset 32-33
+    if (len >= 34 && p[32] == 0x88 && p[33] == 0x8E) return true;
     return false;
 }
 
 static int classifyEapolMsg(const wifi_promiscuous_pkt_t *pkt) {
     const uint8_t *p = pkt->payload;
-    int qos = ((p[0] & 0x0F) == 0x08) ? 2 : 0;
-    int off = 24 + qos + 8 + 4 + 1;  // MAC + LLC/SNAP + EAPOL hdr + descriptor
-    if (pkt->rx_ctrl.sig_len < off + 2) return -1;
+    int len = pkt->rx_ctrl.sig_len;
+    // Find EAPOL start: after LLC/SNAP header (EtherType 0x888E)
+    int eapolStart = -1;
+    if (p[30] == 0x88 && p[31] == 0x8E) eapolStart = 32;       // non-QoS
+    else if (len >= 34 && p[32] == 0x88 && p[33] == 0x8E) eapolStart = 34;  // QoS
+    if (eapolStart < 0) return -1;
+    // EAPOL header: version(1) + type(1) + length(2) = 4 bytes
+    // EAPOL-Key: descriptor_type(1) + key_info(2)
+    int off = eapolStart + 4 + 1;  // skip EAPOL header + descriptor type
+    if (len < off + 2) return -1;
     uint16_t keyInfo = (p[off] << 8) | p[off + 1];
     bool install = keyInfo & (1 << 6);
     bool ack     = keyInfo & (1 << 7);
@@ -2226,14 +2230,24 @@ static void hsSniffHook(const wifi_promiscuous_pkt_t* pkt, uint16_t rawLen) {
 
     // Count ALL frame types from target (not gated by SD)
     if (isBeacon) s_hsBeacons++;
+    // Log authentication frames (SAE uses auth type 3)
+    if (frameType == 0 && frameSubtype == 11) {  // Authentication
+        Serial.printf("[hs-AUTH] len=%d algo=%d seq=%d\n", len,
+            (len > 25) ? (pkt->payload[24] | (pkt->payload[25] << 8)) : -1,
+            (len > 27) ? (pkt->payload[26] | (pkt->payload[27] << 8)) : -1);
+    }
+    // Log association frames
+    if (frameType == 0 && (frameSubtype == 0 || frameSubtype == 1)) {
+        Serial.printf("[hs-ASSOC] sub=%d len=%d\n", frameSubtype, len);
+    }
+
     if (frameType == 2) {
         s_hsDataFrames++;
         bool isProtected = (pkt->payload[1] & 0x40) != 0;
-        // Log EVERY unencrypted data frame — EAPOL must be unencrypted
-        if (!isProtected && len > 36) {
-            Serial.printf("[hs-UNENC] fc=%02X%02X len=%d bytes[24..39]: ",
+        if (!isProtected && len > 34) {
+            Serial.printf("[hs-UNENC] fc=%02X%02X len=%d bytes[28..35]: ",
                 fc0, pkt->payload[1], len);
-            for (int i = 24; i < 40 && i < len; i++)
+            for (int i = 28; i < 36 && i < len; i++)
                 Serial.printf("%02X ", pkt->payload[i]);
             Serial.println();
         }
