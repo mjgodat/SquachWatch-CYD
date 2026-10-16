@@ -16,6 +16,18 @@ enum class PayloadType : uint8_t {
     COUNT
 };
 
+// Payloads that need an attacker IP
+static bool payloadNeedsIP(PayloadType t) {
+    return t == PayloadType::REVERSE_SHELL || t == PayloadType::DOWNLOAD_EXEC || t == PayloadType::PERSISTENCE;
+}
+
+// Replace ATTACKER_IP in a payload string with the actual IP
+static String payloadWithIP(const char* script, const char* ip) {
+    String s(script);
+    s.replace("ATTACKER_IP", ip);
+    return s;
+}
+
 static const char* PAYLOAD_OS_NAMES[] = { "WINDOWS", "MAC", "LINUX" };
 
 static const char* PAYLOAD_NAMES[] = {

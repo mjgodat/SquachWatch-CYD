@@ -1833,6 +1833,9 @@ static PayloadOS s_payloadOS = PayloadOS::WINDOWS;
 static int s_payloadIdx = -1;
 static bool s_payloadRunning = false;
 static bool s_payloadPickOS = true;
+static bool s_payloadEnterIP = false;
+static char s_attackerIP[16] = "192.168.1.100";
+static int s_attackerIPLen = 13;
 
 #ifdef USB_HID_DISABLED
 // USB HID disabled — stub everything out
@@ -1983,6 +1986,47 @@ static void badUsbStart() {
 static void drawBadUsb(TFT_eSPI& t, uint32_t now) {
     const int w = t.width();
     const int h = t.height();
+
+    if (s_payloadEnterIP) {
+        t.setTextColor(Theme::CYAN, Theme::BG);
+        t.setTextDatum(MC_DATUM);
+        t.drawString("ENTER ATTACKER IP", w / 2, HEADER_H + 10, 2);
+        t.setTextColor(Theme::VAPOR_PINK, Theme::BG);
+        t.drawString(PAYLOAD_NAMES[s_payloadIdx], w / 2, HEADER_H + 30, 2);
+
+        // IP input bar
+        int inputY = h / 2 - 50;
+        t.fillRect(30, inputY, w - 60, 30, Theme::TASKBAR);
+        t.drawRect(30, inputY, w - 60, 30, Theme::CYAN);
+        t.setTextColor(Theme::VAPOR_YELLOW, Theme::TASKBAR);
+        t.setTextDatum(MC_DATUM);
+        t.drawString(String(s_attackerIP) + "_", w / 2, inputY + 15, 4);
+
+        // Number pad for IP entry
+        static const char* numKeys[] = {"1","2","3","4","5","6","7","8","9",".","0","DEL"};
+        int kw = 60, kh = 40, gap = 4;
+        int startX = (w - 3 * (kw + gap)) / 2;
+        int startY = h / 2;
+        for (int i = 0; i < 12; i++) {
+            int col = i % 3, row = i / 3;
+            int kx = startX + col * (kw + gap);
+            int ky = startY + row * (kh + gap);
+            bool isDel = (i == 11);
+            t.fillRoundRect(kx, ky, kw, kh, 5, isDel ? TFT_RED : Theme::TASKBAR);
+            t.setTextColor(TFT_WHITE, isDel ? TFT_RED : Theme::TASKBAR);
+            t.setTextDatum(MC_DATUM);
+            t.drawString(numKeys[i], kx + kw/2, ky + kh/2, 2);
+        }
+        // OK button
+        t.fillRoundRect(startX, startY + 4*(kh+gap), 3*kw + 2*gap, kh, 5, TFT_DARKGREEN);
+        t.setTextColor(TFT_WHITE, TFT_DARKGREEN);
+        t.drawString("EXECUTE", w / 2, startY + 4*(kh+gap) + kh/2, 2);
+
+        t.fillRect(0, h - 24, w, 24, Theme::TASKBAR);
+        t.setTextColor(Theme::AMBER, Theme::TASKBAR);
+        t.drawString("TAP TO CANCEL", w / 2, h - 12, 2);
+        return;
+    }
 
     if (s_payloadRunning) {
         t.setTextColor(Theme::RED, Theme::BG);
@@ -4379,8 +4423,41 @@ bool uiToolboxHandleTap(TFT_eSPI& t, int16_t x, int16_t y, uint32_t now) {
             }
             return true;
         }
-        // BadUSB: payload OS/type selection
+        // BadUSB: IP input, OS/payload selection
         if (s_activeTool == ActiveTool::BADUSB_DUCKY && !s_payloadRunning) {
+            // IP entry screen
+            if (s_payloadEnterIP) {
+                if (tapBottom) { s_payloadEnterIP = false; return true; }
+                int kw = 60, kh = 40, gap = 4;
+                int w_ = t.width(), h_ = t.height();
+                int startX = (w_ - 3 * (kw + gap)) / 2;
+                int startY = h_ / 2;
+                // Check OK button
+                if (y >= startY + 4*(kh+gap) && y < startY + 5*(kh+gap)) {
+                    // EXECUTE with IP
+                    const char* script = PAYLOAD_TABLE[(int)s_payloadOS][s_payloadIdx];
+                    String resolved = payloadWithIP(script, s_attackerIP);
+                    executePayload(resolved.c_str());
+                    s_payloadEnterIP = false;
+                    return true;
+                }
+                // Check numpad
+                if (y >= startY && y < startY + 4*(kh+gap)) {
+                    int col = (x - startX) / (kw + gap);
+                    int row = (y - startY) / (kh + gap);
+                    if (col >= 0 && col < 3 && row >= 0 && row < 4) {
+                        int idx = row * 3 + col;
+                        if (idx == 11) {  // DEL
+                            if (s_attackerIPLen > 0) s_attackerIP[--s_attackerIPLen] = 0;
+                        } else if (s_attackerIPLen < 15) {
+                            static const char numChars[] = "123456789.0";
+                            s_attackerIP[s_attackerIPLen++] = numChars[idx];
+                            s_attackerIP[s_attackerIPLen] = 0;
+                        }
+                    }
+                }
+                return true;
+            }
             if (tapBottom) {
                 stopActiveTool();
                 s_level = ToolboxLevel::CATEGORIES;
@@ -4396,7 +4473,6 @@ bool uiToolboxHandleTap(TFT_eSPI& t, int16_t x, int16_t y, uint32_t now) {
                     s_payloadPickOS = false;
                     s_toolScroll = 0;
                 } else {
-                    // BACK
                     stopActiveTool();
                     s_level = ToolboxLevel::USB_TOOLS;
                     s_scroll = 0;
@@ -4404,8 +4480,13 @@ bool uiToolboxHandleTap(TFT_eSPI& t, int16_t x, int16_t y, uint32_t now) {
             } else {
                 if (row >= 0 && row < (int)PayloadType::BACK) {
                     s_payloadIdx = row;
-                    const char* script = PAYLOAD_TABLE[(int)s_payloadOS][row];
-                    executePayload(script);
+                    if (payloadNeedsIP((PayloadType)row)) {
+                        // Show IP input screen
+                        s_payloadEnterIP = true;
+                    } else {
+                        const char* script = PAYLOAD_TABLE[(int)s_payloadOS][row];
+                        executePayload(script);
+                    }
                 } else {
                     s_payloadPickOS = true;
                     s_toolScroll = 0;
