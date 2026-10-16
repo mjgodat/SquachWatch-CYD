@@ -9,7 +9,11 @@
 #define WICHAT_MAX_NAME_LEN  16
 #define WICHAT_MAX_PAYLOAD   236
 #define WICHAT_FRAME_MAX     250
+#if defined(CONFIG_IDF_TARGET_ESP32S3)
 #define WICHAT_DEDUP_SIZE    256
+#else
+#define WICHAT_DEDUP_SIZE    64
+#endif
 #define WICHAT_DEFAULT_TTL   7
 #define WICHAT_BEACON_INTERVAL_MS  2000
 #define WICHAT_FEC_TIMEOUT_MS     10000
@@ -27,7 +31,11 @@
 #define WICHAT_TYPE_FEC_CHUNK 0x06
 
 /* Display -- 3.5" ST77922 QSPI, landscape after rotation */
+#if defined(CONFIG_IDF_TARGET_ESP32S3)
 #define WICHAT_MAX_MESSAGES   64
+#else
+#define WICHAT_MAX_MESSAGES   8
+#endif
 #define TFT_WIDTH             480
 #define TFT_HEIGHT            320
 
@@ -52,6 +60,10 @@
 #define KB_HEIGHT       160
 #define CHAT_Y          24
 
+#if defined(CONFIG_IDF_TARGET_ESP32S3)
 #define MESH_MAX_NODES  16
+#else
+#define MESH_MAX_NODES  8
+#endif
 
 #endif /* WICHAT_CONFIG_H */
