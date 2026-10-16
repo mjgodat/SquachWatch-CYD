@@ -1840,23 +1840,14 @@ static int s_attackerIPLen = 13;
 #ifdef USB_HID_DISABLED
 // USB HID disabled — stub everything out
 static void* s_usbKb = nullptr;
-#elif 1
-// Use the global keyboard — already registered at boot
-static USBHIDKeyboard* s_usbKb = &s_globalKb;
-#define KEY_RETURN 0
-#define KEY_TAB 0
-#define KEY_ESC 0
-#define KEY_BACKSPACE 0
-#define KEY_DELETE 0
-#define KEY_UP_ARROW 0
-#define KEY_DOWN_ARROW 0
-#define KEY_LEFT_ARROW 0
-#define KEY_RIGHT_ARROW 0
-#define KEY_LEFT_GUI 0
-#define KEY_LEFT_ALT 0
-#define KEY_LEFT_CTRL 0
-#define KEY_LEFT_SHIFT 0
 #else
+// Use the global keyboard — already registered at boot
+// KEY_ constants come from USBHIDKeyboard.h — do NOT redefine them
+static USBHIDKeyboard* s_usbKb = &s_globalKb;
+// Ensure HID semaphores are created before any tool sends reports
+__attribute__((constructor)) static void _initGlobalKb() { s_globalKb.begin(); }
+#endif
+#if 0 // dead branch — kept for reference
 static USBHIDKeyboard* s_usbKb = nullptr;
 #endif
 static bool s_usbRunning = false;
