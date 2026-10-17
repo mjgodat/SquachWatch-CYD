@@ -2,6 +2,7 @@
 // Every tool accessible from serial command line.
 #include "cli.h"
 #include "ui_toolbox.h"
+#include "badusb_payloads.h"
 #include <Arduino.h>
 #include <WiFi.h>
 #include <esp_wifi.h>
@@ -168,4 +169,236 @@ void cli_bridge_init() {
     cbs.reboot = cb_reboot;
 
     cli_set_callbacks(&cbs);
+}
+
+// =============================================================================
+// Tool executor — every attack tool accessible from CLI
+// =============================================================================
+// These are declared in ui_toolbox.cpp — we call them directly
+extern void wifiScanStart();
+extern int s_scanCount;
+
+// Tool state helpers
+extern void uiToolboxStopTool();
+extern bool uiToolboxToolRunning();
+
+void cli_tool_exec(const char* cmd) {
+    // --- Stop ---
+    if (strcmp(cmd, "stop") == 0) {
+        if (uiToolboxToolRunning()) {
+            uiToolboxStopTool();
+            Serial.println("[OK] Tool stopped");
+        } else {
+            Serial.println("[OK] Nothing running");
+        }
+        return;
+    }
+
+    // --- Deauth ---
+    if (strncmp(cmd, "deauth ", 7) == 0) {
+        int idx = atoi(cmd + 7);
+        if (s_scanCount == 0) {
+            Serial.println("[ERR] No scan results. Run 'scan wifi' first");
+        } else if (idx < 0 || idx >= s_scanCount) {
+            Serial.printf("[ERR] Invalid index %d (0-%d)\n", idx, s_scanCount - 1);
+        } else {
+            // Start deauth via toolbox
+            extern void deauthStart(int);
+            deauthStart(idx);
+            Serial.printf("[OK] Deauth started on network #%d\n", idx);
+        }
+        return;
+    }
+
+    // --- Capture Handshake ---
+    if (strncmp(cmd, "capture handshake ", 18) == 0) {
+        int idx = atoi(cmd + 18);
+        if (s_scanCount == 0) {
+            Serial.println("[ERR] No scan results. Run 'scan wifi' first");
+        } else if (idx < 0 || idx >= s_scanCount) {
+            Serial.printf("[ERR] Invalid index %d\n", idx);
+        } else {
+            extern void handshakeCaptureStart(int);
+            handshakeCaptureStart(idx);
+            Serial.printf("[OK] Handshake capture started on #%d\n", idx);
+        }
+        return;
+    }
+
+    // --- Capture PCAP ---
+    if (strcmp(cmd, "capture pcap") == 0) {
+        extern void pcapCaptureStart();
+        pcapCaptureStart();
+        Serial.println("[OK] PCAP capture started");
+        return;
+    }
+
+    // --- Capture Probe ---
+    if (strcmp(cmd, "capture probe") == 0) {
+        extern void probeSniffStart();
+        probeSniffStart();
+        Serial.println("[OK] Probe sniff started");
+        return;
+    }
+
+    // --- Clone AP ---
+    if (strncmp(cmd, "clone ", 6) == 0) {
+        int idx = atoi(cmd + 6);
+        if (s_scanCount == 0) {
+            Serial.println("[ERR] No scan results. Run 'scan wifi' first");
+        } else {
+            extern void cloneApStart(int);
+            cloneApStart(idx >= 0 && idx < s_scanCount ? idx : 0);
+            Serial.printf("[OK] Clone AP started for #%d\n", idx);
+        }
+        return;
+    }
+
+    // --- Evil Portal ---
+    if (strcmp(cmd, "evil portal start") == 0) {
+        extern void evilPortalStart();
+        evilPortalStart();
+        Serial.println("[OK] Evil portal started");
+        return;
+    }
+    if (strcmp(cmd, "evil portal stop") == 0) {
+        extern void evilPortalStop();
+        evilPortalStop();
+        Serial.println("[OK] Evil portal stopped");
+        return;
+    }
+
+    // --- Karma ---
+    if (strcmp(cmd, "karma start") == 0) {
+        extern void karmaStart();
+        karmaStart();
+        Serial.println("[OK] Karma started");
+        return;
+    }
+    if (strcmp(cmd, "karma stop") == 0) {
+        extern void karmaStop();
+        karmaStop();
+        Serial.println("[OK] Karma stopped");
+        return;
+    }
+
+    // --- DHCP Starve ---
+    if (strcmp(cmd, "dhcp starve") == 0) {
+        extern void dhcpStarveStart();
+        dhcpStarveStart();
+        Serial.println("[OK] DHCP starve started");
+        return;
+    }
+
+    // --- Spam Beacon ---
+    if (strcmp(cmd, "spam beacon") == 0) {
+        extern void beaconSpamStart();
+        beaconSpamStart();
+        Serial.println("[OK] Beacon spam started");
+        return;
+    }
+
+    // --- Spam Rickroll ---
+    if (strcmp(cmd, "spam rickroll") == 0) {
+        extern void rickrollStart();
+        rickrollStart();
+        Serial.println("[OK] Rickroll started");
+        return;
+    }
+
+    // --- Spam Apple ---
+    if (strcmp(cmd, "spam apple") == 0) {
+        extern void appleSpamStart();
+        appleSpamStart();
+        Serial.println("[OK] Apple BLE spam started");
+        return;
+    }
+
+    // --- Spam Samsung ---
+    if (strcmp(cmd, "spam samsung") == 0) {
+        extern void samsungSpamStart();
+        samsungSpamStart();
+        Serial.println("[OK] Samsung BLE spam started");
+        return;
+    }
+
+    // --- Spam SwiftPair ---
+    if (strcmp(cmd, "spam swiftpair") == 0) {
+        extern void swiftPairStart();
+        swiftPairStart();
+        Serial.println("[OK] SwiftPair spam started");
+        return;
+    }
+
+    // --- Flipper Scan ---
+    if (strcmp(cmd, "flipper scan") == 0) {
+        extern void flipperDetectStart();
+        flipperDetectStart();
+        Serial.println("[OK] Flipper detect started");
+        return;
+    }
+
+    // --- AirTag Spoof ---
+    if (strcmp(cmd, "airtag spoof") == 0) {
+        extern void airtagSpoofStart();
+        airtagSpoofStart();
+        Serial.println("[OK] AirTag spoof started");
+        return;
+    }
+
+    // --- Haystack ---
+    if (strcmp(cmd, "haystack start") == 0) {
+        extern void haystackStart();
+        haystackStart();
+        Serial.println("[OK] Haystack beacon started");
+        return;
+    }
+    if (strcmp(cmd, "haystack stop") == 0) {
+        uiToolboxStopTool();
+        Serial.println("[OK] Haystack stopped");
+        return;
+    }
+
+    // --- LAN Scan ---
+    if (strcmp(cmd, "lan scan") == 0) {
+        extern void wifiNetScanStart();
+        wifiNetScanStart();
+        Serial.println("[OK] LAN scan started");
+        return;
+    }
+
+    // --- BadUSB ---
+    if (strncmp(cmd, "badusb ", 7) == 0) {
+        extern void executePayload(const char*);
+        extern String payloadWithIP(const char*, const char*);
+        const char* args = cmd + 7;
+        // Parse: badusb <os> <payload> [ip]
+        // os: windows|mac|linux
+        // payload: wifi|sysinfo|revshell|admin|antivirus|download|browser|persist
+        int os = -1;
+        if (strncmp(args, "windows ", 8) == 0) { os = 0; args += 8; }
+        else if (strncmp(args, "mac ", 4) == 0) { os = 1; args += 4; }
+        else if (strncmp(args, "linux ", 6) == 0) { os = 2; args += 6; }
+        else { Serial.println("[ERR] badusb <windows|mac|linux> <payload>"); return; }
+
+        int payload = -1;
+        if (strncmp(args, "wifi", 4) == 0) payload = 0;
+        else if (strncmp(args, "sysinfo", 7) == 0) payload = 1;
+        else if (strncmp(args, "revshell", 8) == 0) payload = 2;
+        else if (strncmp(args, "admin", 5) == 0) payload = 3;
+        else if (strncmp(args, "antivirus", 9) == 0) payload = 4;
+        else if (strncmp(args, "download", 8) == 0) payload = 5;
+        else if (strncmp(args, "browser", 7) == 0) payload = 6;
+        else if (strncmp(args, "persist", 7) == 0) payload = 7;
+        else { Serial.println("[ERR] payload: wifi|sysinfo|revshell|admin|antivirus|download|browser|persist"); return; }
+
+        // PAYLOAD_TABLE from badusb_payloads.h (included at top of file)
+        const char* script = PAYLOAD_TABLE[os][payload];
+        Serial.printf("[OK] Running %s payload %d...\n", os==0?"Windows":os==1?"Mac":"Linux", payload);
+        executePayload(script);
+        Serial.println("[OK] Payload executed");
+        return;
+    }
+
+    Serial.printf("[ERR] Unknown tool command: '%s'\n", cmd);
 }

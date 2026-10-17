@@ -98,7 +98,7 @@ struct ScanResult {
     uint8_t bssid[6];
 };
 static ScanResult s_scanResults[MAX_SCAN_RESULTS];
-static int s_scanCount = 0;
+int s_scanCount = 0;
 static bool s_scanning = false;
 static int s_scanSelected = -1;  // for deauth target selection
 
@@ -250,7 +250,7 @@ static uint8_t deauthFrame[26] = {
     0x07, 0x00                          // reason: class 3 frame from nonassociated STA
 };
 
-static void deauthStart(int scanIdx) {
+void deauthStart(int scanIdx) {
     if (scanIdx < 0 || scanIdx >= s_scanCount) return;
     memcpy(s_deauthBssid, s_scanResults[scanIdx].bssid, 6);
     s_deauthChan = s_scanResults[scanIdx].channel;
@@ -351,7 +351,7 @@ static uint8_t beaconFrame[128] = {
     // Tagged parameters start at offset 36
 };
 
-static void beaconSpamStart() {
+void beaconSpamStart() {
     WiFi.mode(WIFI_STA);
     WiFi.disconnect();
     esp_wifi_set_channel(1, WIFI_SECOND_CHAN_NONE);
@@ -456,7 +456,7 @@ static uint32_t s_rickSent = 0;
 static uint32_t s_rickLastMs = 0;
 static bool     s_rickMode = false;  // true = rickroll, false = funny names
 
-static void rickrollStart() {
+void rickrollStart() {
     WiFi.mode(WIFI_STA);
     WiFi.disconnect();
     esp_wifi_set_channel(6, WIFI_SECOND_CHAN_NONE);
@@ -535,7 +535,7 @@ static char s_cloneSsid[33] = {0};
 static uint32_t s_cloneClients = 0;
 static uint32_t s_cloneStartMs = 0;
 
-static void cloneApStart(int scanIdx) {
+void cloneApStart(int scanIdx) {
     if (scanIdx < 0 || scanIdx >= s_scanCount) return;
     strncpy(s_cloneSsid, s_scanResults[scanIdx].ssid, 32);
     s_cloneSsid[32] = 0;
@@ -641,7 +641,7 @@ static void portalHandleNotFound() {
     s_portalHits++;
 }
 
-static void evilPortalStart() {
+void evilPortalStart() {
     strncpy(s_portalSsid, "Free_WiFi", 32);
     s_portalHits = 0;
     s_credCount = 0;
@@ -661,7 +661,7 @@ static void evilPortalStart() {
                   s_portalSsid, WiFi.softAPIP().toString().c_str());
 }
 
-static void evilPortalStop() {
+void evilPortalStop() {
     if (s_portalWeb) { s_portalWeb->stop(); delete s_portalWeb; s_portalWeb = nullptr; }
     if (s_portalDns) { s_portalDns->stop(); delete s_portalDns; s_portalDns = nullptr; }
     WiFi.softAPdisconnect(true);
@@ -774,7 +774,7 @@ static void probeSniffHook(const wifi_promiscuous_pkt_t* pkt, uint16_t rawLen) {
     e.lastSeen = millis();
 }
 
-static void probeSniffStart() {
+void probeSniffStart() {
     s_probeCount = 0;
     s_probeActive = true;
     wichat_set_capture_hook(probeSniffHook);
@@ -891,7 +891,7 @@ static void karmaSniffHook(const wifi_promiscuous_pkt_t* pkt, uint16_t rawLen) {
     }
 }
 
-static void karmaStart() {
+void karmaStart() {
     s_karmaCount = 0;
     s_karmaBeacons = 0;
     s_karmaActive = true;
@@ -900,7 +900,7 @@ static void karmaStart() {
     Serial.println("[toolbox] Karma started (via hook)");
 }
 
-static void karmaStop() {
+void karmaStop() {
     s_karmaActive = false;
     wichat_set_capture_hook(nullptr);
 }
@@ -974,7 +974,7 @@ static uint32_t s_dhcpSent = 0;
 static uint32_t s_dhcpLastMs = 0;
 
 // DHCP Discover packet template (UDP, broadcast)
-static void dhcpStarveStart() {
+void dhcpStarveStart() {
     WiFi.mode(WIFI_STA);
     WiFi.disconnect();
     s_dhcpSent = 0;
@@ -1155,7 +1155,7 @@ static const char* APPLE_NAMES[] = {
 };
 static const int APPLE_DEV_COUNT = 8;
 
-static void appleSpamStart() {
+void appleSpamStart() {
     s_appleSpamCount = 0;
     s_appleSpamLastMs = 0;
     s_appleDevIdx = 0;
@@ -1259,7 +1259,7 @@ static const char* SAMSUNG_NAMES[] = {
 };
 static const int SAMSUNG_DEV_COUNT = 6;
 
-static void samsungSpamStart() {
+void samsungSpamStart() {
     s_samsungSpamCount = 0;
     s_samsungSpamLastMs = 0;
     s_samsungDevIdx = 0;
@@ -1343,7 +1343,7 @@ static const char* SWIFT_NAMES[] = {
 static const int SWIFT_DEV_COUNT = 6;
 static int s_swiftDevIdx = 0;
 
-static void swiftPairStart() {
+void swiftPairStart() {
     s_swiftSpamCount = 0;
     s_swiftSpamLastMs = 0;
     s_swiftDevIdx = 0;
@@ -1562,7 +1562,7 @@ class FlipperBleCallbacks : public NimBLEScanCallbacks {
 };
 static FlipperBleCallbacks s_flipperCb;
 
-static void flipperDetectStart() {
+void flipperDetectStart() {
     s_flipperCount = 0;
     s_flipperScanning = true;
     if (!NimBLEDevice::isInitialized()) NimBLEDevice::init("");
@@ -1690,7 +1690,7 @@ static void drawSdBrowser(TFT_eSPI& t, uint32_t now) {
 static uint32_t s_airtagCount = 0;
 static uint32_t s_airtagLastMs = 0;
 
-static void airtagSpoofStart() {
+void airtagSpoofStart() {
     s_airtagCount = 0;
     s_airtagLastMs = 0;
     if (!NimBLEDevice::isInitialized()) NimBLEDevice::init("");
@@ -1756,7 +1756,7 @@ static uint32_t s_haystackCount = 0;
 static uint32_t s_haystackLastMs = 0;
 static uint8_t s_haystackKey[28];  // public key for tracking
 
-static void haystackStart() {
+void haystackStart() {
     s_haystackCount = 0;
     s_haystackLastMs = 0;
     // Generate a persistent key for this session
@@ -1873,7 +1873,7 @@ static int s_duckyTotal = 0;
 #ifdef USB_HID_DISABLED
 static void badUsbStart() { Serial.println("[toolbox] USB HID disabled — ESP32 has no native USB"); }
 static void usbKeyboardStart() { Serial.println("[toolbox] USB HID disabled"); }
-static void executePayload(const char*) { Serial.println("[toolbox] USB HID disabled"); }
+void executePayload(const char*) { Serial.println("[toolbox] USB HID disabled"); }
 static void drawBadUsb(TFT_eSPI& t, uint32_t now) {
     t.setTextColor(Theme::RED, Theme::BG); t.setTextDatum(MC_DATUM);
     t.drawString("USB HID DISABLED", t.width()/2, t.height()/2, 4);
@@ -2099,7 +2099,7 @@ static void drawBadUsb(TFT_eSPI& t, uint32_t now) {
 // =============================================================================
 // (payload state declared above the #ifdef block)
 
-static void executePayload(const char* script) {
+void executePayload(const char* script) {
     if (!s_usbKb || !script) return;
     s_usbKb->begin();
     delay(300);
@@ -2230,7 +2230,7 @@ static void pcapFlushQueue() {
     }
 }
 
-static void pcapCaptureStart() {
+void pcapCaptureStart() {
     s_pcapFrames = 0;
     s_pcapOpen = false;
     if (!s_captureQueue) s_captureQueue = xQueueCreate(16, sizeof(CaptureFrame));
@@ -2430,7 +2430,7 @@ static void hsSniffHook(const wifi_promiscuous_pkt_t* pkt, uint16_t rawLen) {
     }
 }
 
-static void handshakeCaptureStart(int scanIdx) {
+void handshakeCaptureStart(int scanIdx) {
     if (scanIdx < 0 || scanIdx >= s_scanCount) return;
     memcpy(s_hsBssid, s_scanResults[scanIdx].bssid, 6);
     strncpy(s_hsSsid, s_scanResults[scanIdx].ssid, 32);
@@ -2648,7 +2648,7 @@ static int s_lanPassLen = 0;
 static int s_lanNetSelected = -1;
 static uint32_t s_lanConnectMs = 0;
 
-static void wifiNetScanStart() {
+void wifiNetScanStart() {
     s_lanHostCount = 0;
     s_lanScanning = false;
     s_lanProgress = 0;

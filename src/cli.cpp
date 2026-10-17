@@ -86,25 +86,60 @@ static const char *skip_word(const char *s) {
 static int parse_int(const char *s) { return atoi(s); }
 
 static void cmd_help(void) {
-    Serial.println("[DATA] === CLI Commands ===");
-    Serial.println("[DATA] tap <x> <y>           Simulate touch");
-    Serial.println("[DATA] hold <x> <y> <ms>     Touch and hold");
-    Serial.println("[DATA] release               Release touch");
-    Serial.println("[DATA] swipe <x1> <y1> <x2> <y2> <ms>");
-    Serial.println("[DATA] screen                Screen info");
-    Serial.println("[DATA] brightness <0-255>    Backlight");
+    Serial.println("[DATA] === SquatchWatch CLI ===");
+    Serial.println("[DATA]");
+    Serial.println("[DATA] --- Scanning ---");
+    Serial.println("[DATA] scan wifi             Scan WiFi networks");
+    Serial.println("[DATA] scan ble              Scan BLE devices");
+    Serial.println("[DATA] flipper scan          Scan for Flipper Zeros");
+    Serial.println("[DATA]");
+    Serial.println("[DATA] --- WiFi Attacks ---");
+    Serial.println("[DATA] deauth <n>            Deauth network #n");
+    Serial.println("[DATA] capture handshake <n> Capture WPA handshake");
+    Serial.println("[DATA] capture pcap          Capture all packets to SD");
+    Serial.println("[DATA] capture probe         Sniff probe requests");
+    Serial.println("[DATA] clone <n>             Clone AP (evil twin)");
+    Serial.println("[DATA] evil portal start     Captive portal");
+    Serial.println("[DATA] evil portal stop");
+    Serial.println("[DATA] karma start           Auto-respond to probes");
+    Serial.println("[DATA] karma stop");
+    Serial.println("[DATA] dhcp starve           DHCP exhaustion");
+    Serial.println("[DATA] spam beacon           Funny SSID spam");
+    Serial.println("[DATA] spam rickroll         Rick Astley SSIDs");
+    Serial.println("[DATA]");
+    Serial.println("[DATA] --- BLE Attacks ---");
+    Serial.println("[DATA] spam apple            Apple pairing popups");
+    Serial.println("[DATA] spam samsung          Samsung pairing popups");
+    Serial.println("[DATA] spam swiftpair        Windows pairing popups");
+    Serial.println("[DATA] airtag spoof          Fake AirTag beacon");
+    Serial.println("[DATA] haystack start        FindMy location beacon");
+    Serial.println("[DATA] haystack stop");
+    Serial.println("[DATA]");
+    Serial.println("[DATA] --- Network ---");
+    Serial.println("[DATA] connect <ssid> <pass> Join WiFi network");
+    Serial.println("[DATA] disconnect            Leave WiFi");
+    Serial.println("[DATA] status                Connection info");
+    Serial.println("[DATA] lan scan              Scan LAN (need WiFi)");
+    Serial.println("[DATA]");
+    Serial.println("[DATA] --- BadUSB ---");
+    Serial.println("[DATA] badusb <os> <payload> Run payload");
+    Serial.println("[DATA]   os: windows|mac|linux");
+    Serial.println("[DATA]   payload: wifi|sysinfo|revshell|admin|antivirus|download|browser|persist");
+    Serial.println("[DATA] hid type <text>       Type text via USB");
+    Serial.println("[DATA]");
+    Serial.println("[DATA] --- WiChat ---");
+    Serial.println("[DATA] chat send <msg>       Send mesh message");
+    Serial.println("[DATA] chat ping             Ping mesh");
+    Serial.println("[DATA] chat nodes            List mesh nodes");
+    Serial.println("[DATA] chat channel <n>      Set channel");
+    Serial.println("[DATA]");
+    Serial.println("[DATA] --- System ---");
+    Serial.println("[DATA] stop                  Stop active tool");
     Serial.println("[DATA] heap                  Memory info");
     Serial.println("[DATA] uptime                Uptime");
-    Serial.println("[DATA] reboot                Restart");
-    Serial.println("[DATA] wifi scan|stop|list   WiFi scanning");
-    Serial.println("[DATA] wifi connect <ssid> <pass>  Join network");
-    Serial.println("[DATA] wifi disconnect|status|ip   Connection");
-    Serial.println("[DATA] ble scan|stop|list    BLE tools");
-    Serial.println("[DATA] chat send|ping|nodes|channel|name|status");
-    Serial.println("[DATA] hid run|type|key      HID injection");
-    Serial.println("[DATA] sleep <ms>            Delay");
-    Serial.println("[DATA] echo <text>           Echo back");
-    Serial.println("[DATA] batch / end           Batch mode");
+    Serial.println("[DATA] reboot                Restart device");
+    Serial.println("[DATA] quiet                 Suppress debug output");
+    Serial.println("[DATA] verbose               Show all output");
     Serial.println("[DATA] help                  This help");
 }
 
@@ -347,6 +382,35 @@ static void cli_exec(const char *line) {
         if (cb && cb->reboot) cb->reboot();
         else ESP.restart();
     }
+    // --- Simple command aliases ---
+    else if (strncmp(line, "scan wifi", 9) == 0) { cmd_wifi("scan"); }
+    else if (strncmp(line, "scan ble", 8) == 0) { cmd_ble("scan"); }
+    else if (strncmp(line, "connect ", 8) == 0) { cmd_wifi(line); }  // "connect X Y" → wifi handler
+    else if (strcmp(line, "disconnect") == 0) { cmd_wifi("disconnect"); }
+    else if (strcmp(line, "status") == 0) { cmd_wifi("status"); }
+    else if (strncmp(line, "hid type ", 9) == 0) { cmd_hid(line + 4); }
+
+    // --- Attack tools (implemented in cli_bridge.cpp) ---
+    else if (strncmp(line, "deauth ", 7) == 0 ||
+             strncmp(line, "capture ", 8) == 0 ||
+             strncmp(line, "clone ", 6) == 0 ||
+             strncmp(line, "spam ", 5) == 0 ||
+             strncmp(line, "evil portal ", 12) == 0 ||
+             strncmp(line, "karma ", 6) == 0 ||
+             strcmp(line, "dhcp starve") == 0 ||
+             strncmp(line, "flipper ", 8) == 0 ||
+             strncmp(line, "airtag ", 7) == 0 ||
+             strncmp(line, "haystack ", 9) == 0 ||
+             strcmp(line, "lan scan") == 0 ||
+             strncmp(line, "badusb ", 7) == 0 ||
+             strcmp(line, "stop") == 0)
+    {
+        // Forward to tool executor in cli_bridge.cpp
+        extern void cli_tool_exec(const char* cmd);
+        cli_tool_exec(line);
+    }
+
+    // --- Original commands ---
     else if (strncmp(line, "wifi ", 5) == 0) { cmd_wifi(line + 5); }
     else if (strncmp(line, "ble ", 4) == 0) { cmd_ble(line + 4); }
     else if (strncmp(line, "chat ", 5) == 0) { cmd_chat(line + 5); }
