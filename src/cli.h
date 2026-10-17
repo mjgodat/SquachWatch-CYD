@@ -50,6 +50,9 @@ extern "C" {
 void cli_init(void);
 void cli_poll(void);  /* Call from loop() — non-blocking */
 
+/* When true, suppress debug/frame output on Serial */
+extern bool cli_quiet_mode;
+
 /* Register feature callbacks. Set to NULL if not available. */
 typedef struct {
     /* Touch simulation */

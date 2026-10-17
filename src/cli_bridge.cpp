@@ -15,8 +15,19 @@ extern ScanResult s_scanResults[];
 static void cb_wifi_scan_start() {
     WiFi.mode(WIFI_STA);
     WiFi.disconnect();
-    WiFi.scanNetworks(true, true);
-    Serial.println("[OK] WiFi scan started");
+    Serial.println("[OK] WiFi scan started — results will print when done");
+    int n = WiFi.scanNetworks(false, true);  // BLOCKING — waits for results
+    if (n > 0) {
+        Serial.printf("[DATA] %d networks found:\n", n);
+        for (int i = 0; i < n && i < 40; i++) {
+            Serial.printf("[DATA] %2d  %-32s  %4ddBm  CH%2d  %s  %s\n",
+                i, WiFi.SSID(i).c_str(), WiFi.RSSI(i), WiFi.channel(i),
+                WiFi.encryptionType(i) == WIFI_AUTH_OPEN ? "OPEN" : "ENC",
+                WiFi.BSSIDstr(i).c_str());
+        }
+    } else {
+        Serial.printf("[DATA] Scan returned %d\n", n);
+    }
 }
 
 static void cb_wifi_scan_stop() {

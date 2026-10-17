@@ -1847,8 +1847,6 @@ static void* s_usbKb = nullptr;
 // Use the global keyboard — already registered at boot
 // KEY_ constants come from USBHIDKeyboard.h — do NOT redefine them
 static USBHIDKeyboard* s_usbKb = &s_globalKb;
-// Ensure HID semaphores are created before any tool sends reports
-__attribute__((constructor)) static void _initGlobalKb() { s_globalKb.begin(); }
 #endif
 #if 0 // dead branch — kept for reference
 static USBHIDKeyboard* s_usbKb = nullptr;

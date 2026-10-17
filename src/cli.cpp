@@ -12,6 +12,9 @@ static char cli_buf[CLI_BUF_SIZE];
 static int cli_pos = 0;
 static const cli_callbacks_t *cb = nullptr;
 
+// Debug output suppression — when quiet, only [OK]/[ERR]/[DATA] pass through
+bool cli_quiet_mode = false;
+
 /* Batch mode */
 static bool batch_mode = false;
 static char *batch_cmds[CLI_BATCH_MAX];
@@ -317,7 +320,15 @@ static void cli_exec(const char *line) {
     while (*line == ' ') line++;
     if (*line == '\0' || *line == '#') return;  /* empty or comment */
 
-    if (strncmp(line, "help", 4) == 0) { cmd_help(); }
+    if (strcmp(line, "quiet") == 0) {
+        cli_quiet_mode = true;
+        Serial.println("[OK] Quiet mode ON — debug output suppressed");
+    }
+    else if (strcmp(line, "verbose") == 0) {
+        cli_quiet_mode = false;
+        Serial.println("[OK] Verbose mode ON — all output shown");
+    }
+    else if (strncmp(line, "help", 4) == 0) { cmd_help(); }
     else if (strncmp(line, "tap ", 4) == 0) { cmd_tap(line + 4); }
     else if (strncmp(line, "hold ", 5) == 0) { cmd_hold(line + 5); }
     else if (strcmp(line, "release") == 0) { cmd_release(); }
