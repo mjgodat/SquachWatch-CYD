@@ -411,5 +411,47 @@ void cli_tool_exec(const char* cmd) {
         return;
     }
 
+    // --- Extended tools (tools_extended.cpp) ---
+    if (strcmp(cmd, "channel analyze") == 0) {
+        extern void channelAnalyzerStart();
+        channelAnalyzerStart();
+        return;
+    }
+    if (strcmp(cmd, "jam detect") == 0) {
+        extern void jamDetectStart();
+        jamDetectStart();
+        return;
+    }
+    if (strcmp(cmd, "socks start") == 0) {
+        extern void socksProxyStart();
+        socksProxyStart();
+        return;
+    }
+    if (strcmp(cmd, "socks stop") == 0) {
+        extern void socksProxyStop();
+        socksProxyStop();
+        return;
+    }
+    if (strcmp(cmd, "netcut scan") == 0) {
+        extern void netcutScan();
+        netcutScan();
+        return;
+    }
+    if (strncmp(cmd, "netcut poison ", 14) == 0) {
+        extern void netcutPoison(int);
+        netcutPoison(atoi(cmd + 14));
+        return;
+    }
+    if (strncmp(cmd, "netcut restore ", 15) == 0) {
+        extern void netcutRestore(int);
+        netcutRestore(atoi(cmd + 15));
+        return;
+    }
+    if (strcmp(cmd, "netcut stop") == 0) {
+        extern void netcutStop();
+        netcutStop();
+        return;
+    }
+
     Serial.printf("[ERR] Unknown tool command: '%s'\n", cmd);
 }

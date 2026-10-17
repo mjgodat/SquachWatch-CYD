@@ -122,6 +122,14 @@ static void cmd_help(void) {
     Serial.println("[DATA] disconnect            Leave WiFi");
     Serial.println("[DATA] status                Connection info");
     Serial.println("[DATA] lan scan              Scan LAN (need WiFi)");
+    Serial.println("[DATA] channel analyze       WiFi channel utilization");
+    Serial.println("[DATA] jam detect            Deauth/jamming detector");
+    Serial.println("[DATA] netcut scan           ARP scan local network");
+    Serial.println("[DATA] netcut poison <n>     ARP poison device #n");
+    Serial.println("[DATA] netcut restore <n>    Restore device #n");
+    Serial.println("[DATA] netcut stop           Restore all devices");
+    Serial.println("[DATA] socks start           SOCKS4 proxy on :1080");
+    Serial.println("[DATA] socks stop            Stop proxy");
     Serial.println("[DATA]");
     Serial.println("[DATA] --- BadUSB ---");
     Serial.println("[DATA] badusb <os> <payload> Run payload");
@@ -430,7 +438,11 @@ static void cli_exec(const char *line) {
              strncmp(line, "haystack ", 9) == 0 ||
              strcmp(line, "lan scan") == 0 ||
              strncmp(line, "badusb ", 7) == 0 ||
-             strcmp(line, "stop") == 0)
+             strcmp(line, "stop") == 0 ||
+             strcmp(line, "channel analyze") == 0 ||
+             strcmp(line, "jam detect") == 0 ||
+             strncmp(line, "socks ", 6) == 0 ||
+             strncmp(line, "netcut ", 7) == 0)
     {
         // Forward to tool executor in cli_bridge.cpp
         extern void cli_tool_exec(const char* cmd);
