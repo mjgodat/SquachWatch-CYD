@@ -114,6 +114,12 @@ static void cmd_help(void) {
     Serial.println("[DATA] spam samsung          Samsung pairing popups");
     Serial.println("[DATA] spam swiftpair        Windows pairing popups");
     Serial.println("[DATA] airtag spoof          Fake AirTag beacon");
+    Serial.println("[DATA] badble start          BLE HID keyboard attack");
+    Serial.println("[DATA] badble type <text>    Type on paired victim");
+    Serial.println("[DATA] badble stop           Stop BadBLE");
+    Serial.println("[DATA] ble sniff             Capture BLE advertisements");
+    Serial.println("[DATA] ninebot <addr> [0-4]  Scooter unlock");
+    Serial.println("[DATA] hfp probe <addr>      HFP vulnerability check");
     Serial.println("[DATA] haystack start        FindMy location beacon");
     Serial.println("[DATA] haystack stop");
     Serial.println("[DATA]");
@@ -442,7 +448,11 @@ static void cli_exec(const char *line) {
              strcmp(line, "channel analyze") == 0 ||
              strcmp(line, "jam detect") == 0 ||
              strncmp(line, "socks ", 6) == 0 ||
-             strncmp(line, "netcut ", 7) == 0)
+             strncmp(line, "netcut ", 7) == 0 ||
+             strncmp(line, "badble ", 7) == 0 ||
+             strcmp(line, "ble sniff") == 0 ||
+             strncmp(line, "ninebot ", 8) == 0 ||
+             strncmp(line, "hfp probe ", 10) == 0)
     {
         // Forward to tool executor in cli_bridge.cpp
         extern void cli_tool_exec(const char* cmd);

@@ -453,5 +453,22 @@ void cli_tool_exec(const char* cmd) {
         return;
     }
 
+    // --- BLE extended tools ---
+    if (strcmp(cmd, "badble start") == 0) { extern void badBleStart(); badBleStart(); return; }
+    if (strcmp(cmd, "badble stop") == 0) { extern void badBleStop(); badBleStop(); return; }
+    if (strcmp(cmd, "badble status") == 0) { extern void badBleStatus(); badBleStatus(); return; }
+    if (strncmp(cmd, "badble type ", 12) == 0) { extern void badBleType(const char*); badBleType(cmd + 12); return; }
+    if (strcmp(cmd, "ble sniff") == 0) { extern void bleSnifferRun(); bleSnifferRun(); return; }
+    if (strncmp(cmd, "ninebot ", 8) == 0) {
+        // ninebot <addr> <payload_index>
+        char addr[18]; int payload = 0;
+        if (sscanf(cmd + 8, "%17s %d", addr, &payload) >= 1) {
+            extern void ninebotAttack(const char*, int);
+            ninebotAttack(addr, payload);
+        } else { Serial.println("[ERR] ninebot <ble_addr> [payload 0-4]"); }
+        return;
+    }
+    if (strncmp(cmd, "hfp probe ", 10) == 0) { extern void hfpProbe(const char*); hfpProbe(cmd + 10); return; }
+
     Serial.printf("[ERR] Unknown tool command: '%s'\n", cmd);
 }
