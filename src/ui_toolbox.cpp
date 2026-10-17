@@ -102,9 +102,14 @@ int s_scanCount = 0;
 static bool s_scanning = false;
 static int s_scanSelected = -1;  // for deauth target selection
 
+static void wifiMaxPower() {
+    esp_wifi_set_max_tx_power(80);  // +20 dBm max for ESP32-S3
+}
+
 static void wifiScanStart() {
     WiFi.mode(WIFI_STA);
     WiFi.disconnect();
+    wifiMaxPower();
     delay(50);
     s_scanning = true;
     s_scanCount = 0;
