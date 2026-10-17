@@ -1160,7 +1160,7 @@ void appleSpamStart() {
     s_appleSpamLastMs = 0;
     s_appleDevIdx = 0;
     if (!NimBLEDevice::isInitialized()) NimBLEDevice::init("");
-    NimBLEDevice::setPower(ESP_PWR_LVL_P9);
+    NimBLEDevice::setPower(ESP_PWR_LVL_P21);
     s_pAdv = NimBLEDevice::getAdvertising();
     Serial.println("[toolbox] Apple BLE spam started");
 }
@@ -1264,7 +1264,7 @@ void samsungSpamStart() {
     s_samsungSpamLastMs = 0;
     s_samsungDevIdx = 0;
     if (!NimBLEDevice::isInitialized()) NimBLEDevice::init("");
-    NimBLEDevice::setPower(ESP_PWR_LVL_P9);
+    NimBLEDevice::setPower(ESP_PWR_LVL_P21);
     s_pAdv = NimBLEDevice::getAdvertising();
     Serial.println("[toolbox] Samsung BLE spam started");
 }
@@ -1348,7 +1348,7 @@ void swiftPairStart() {
     s_swiftSpamLastMs = 0;
     s_swiftDevIdx = 0;
     if (!NimBLEDevice::isInitialized()) NimBLEDevice::init("");
-    NimBLEDevice::setPower(ESP_PWR_LVL_P9);
+    NimBLEDevice::setPower(ESP_PWR_LVL_P21);
     s_pAdv = NimBLEDevice::getAdvertising();
     Serial.println("[toolbox] SwiftPair spam started");
 }
@@ -1694,7 +1694,7 @@ void airtagSpoofStart() {
     s_airtagCount = 0;
     s_airtagLastMs = 0;
     if (!NimBLEDevice::isInitialized()) NimBLEDevice::init("");
-    NimBLEDevice::setPower(ESP_PWR_LVL_P9);
+    NimBLEDevice::setPower(ESP_PWR_LVL_P21);
     s_pAdv = NimBLEDevice::getAdvertising();
     Serial.println("[toolbox] AirTag spoof started");
 }
@@ -1763,7 +1763,7 @@ void haystackStart() {
     for (int i = 0; i < 28; i++) s_haystackKey[i] = random(0, 256);
     s_haystackKey[0] = (s_haystackKey[0] & 0x3F) | 0x40;
     if (!NimBLEDevice::isInitialized()) NimBLEDevice::init("");
-    NimBLEDevice::setPower(ESP_PWR_LVL_P9);
+    NimBLEDevice::setPower(ESP_PWR_LVL_P21);
     s_pAdv = NimBLEDevice::getAdvertising();
     Serial.println("[toolbox] Haystack beacon started");
     Serial.printf("[haystack] Key: ");
