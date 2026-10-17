@@ -2,6 +2,8 @@
 #include "cli.h"
 #include <Arduino.h>
 #include <WiFi.h>
+#include <esp_wifi.h>
+#include <NimBLEDevice.h>
 #include <string.h>
 #include <stdlib.h>
 
@@ -135,6 +137,9 @@ static void cmd_help(void) {
     Serial.println("[DATA]");
     Serial.println("[DATA] --- System ---");
     Serial.println("[DATA] stop                  Stop active tool");
+    Serial.println("[DATA] power                 Show radio power");
+    Serial.println("[DATA] power max             Max WiFi+BLE power");
+    Serial.println("[DATA] power wifi <dBm>      Set WiFi power");
     Serial.println("[DATA] heap                  Memory info");
     Serial.println("[DATA] uptime                Uptime");
     Serial.println("[DATA] reboot                Restart device");
@@ -382,6 +387,28 @@ static void cli_exec(const char *line) {
         if (cb && cb->reboot) cb->reboot();
         else ESP.restart();
     }
+    // --- Power ---
+    else if (strcmp(line, "power max") == 0) {
+        esp_wifi_set_max_tx_power(80);
+        NimBLEDevice::setPower(ESP_PWR_LVL_P21);
+        Serial.println("[OK] WiFi +20dBm, BLE +21dBm");
+    }
+    else if (strncmp(line, "power wifi ", 11) == 0) {
+        int dbm = parse_int(line + 11);
+        esp_wifi_set_max_tx_power(dbm * 4);
+        Serial.printf("[OK] WiFi power set to +%ddBm\n", dbm);
+    }
+    else if (strncmp(line, "power ble ", 10) == 0) {
+        int level = parse_int(line + 10);
+        NimBLEDevice::setPower((esp_power_level_t)level);
+        Serial.printf("[OK] BLE power level set to %d\n", level);
+    }
+    else if (strcmp(line, "power") == 0) {
+        int8_t wifiPow;
+        esp_wifi_get_max_tx_power(&wifiPow);
+        Serial.printf("[DATA] WiFi: +%ddBm  BLE: max\n", wifiPow / 4);
+    }
+
     // --- Simple command aliases ---
     else if (strncmp(line, "scan wifi", 9) == 0) { cmd_wifi("scan"); }
     else if (strncmp(line, "scan ble", 8) == 0) { cmd_ble("scan"); }

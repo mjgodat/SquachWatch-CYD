@@ -6,6 +6,7 @@
 #include <Arduino.h>
 #include <WiFi.h>
 #include <esp_wifi.h>
+#include <NimBLEDevice.h>
 
 // External references to toolbox state (declared in ui_toolbox.cpp)
 extern int s_scanCount;
@@ -145,6 +146,13 @@ static void cb_reboot() {
     ESP.restart();
 }
 
+// ---- System: max power at boot ----
+static void maxRadioPower() {
+    esp_wifi_set_max_tx_power(80);  // +20 dBm WiFi
+    NimBLEDevice::setPower(ESP_PWR_LVL_P21);  // +21 dBm BLE
+    Serial.println("[OK] Radio power: WiFi +20dBm, BLE +21dBm");
+}
+
 // ---- Registration ----
 void cli_bridge_init() {
     static cli_callbacks_t cbs;
@@ -169,6 +177,9 @@ void cli_bridge_init() {
     cbs.reboot = cb_reboot;
 
     cli_set_callbacks(&cbs);
+
+    // Max radio power at boot
+    maxRadioPower();
 }
 
 // =============================================================================
