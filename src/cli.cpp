@@ -1,5 +1,6 @@
 /* cli.cpp -- Serial command interface for remote operation & test automation */
 #include "cli.h"
+#include "ble_tx_power.h"
 #include <Arduino.h>
 #include <WiFi.h>
 #include <esp_wifi.h>
@@ -404,7 +405,7 @@ static void cli_exec(const char *line) {
     // --- Power ---
     else if (strcmp(line, "power max") == 0) {
         esp_wifi_set_max_tx_power(80);
-        NimBLEDevice::setPower(ESP_PWR_LVL_P21);
+        NimBLEDevice::setPower(SQW_BLE_MAX_PWR);
         Serial.println("[OK] WiFi +20dBm, BLE +21dBm");
     }
     else if (strncmp(line, "power wifi ", 11) == 0) {
